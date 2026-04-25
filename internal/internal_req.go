@@ -168,8 +168,22 @@ func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
 		return nil, ErrAgeVerification
 	}
 
+	// For 403 responses, log the body to understand what's happening
+	// Don't immediately assume it's a private stream
 	if resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf("forbidden: %w", ErrPrivateStream)
+		bodyPreview := string(b)
+		if len(bodyPreview) > 500 {
+			bodyPreview = bodyPreview[:500] + "..."
+		}
+		fmt.Printf("[WARN] HTTP 403 for %s - Response body: %s\n", req.URL, bodyPreview)
+		
+		// Only return ErrPrivateStream if we're sure it's actually private
+		// Otherwise, return the body so the caller can parse it
+		if strings.Contains(string(b), "private") || strings.Contains(string(b), "Private") {
+			return nil, fmt.Errorf("forbidden: %w", ErrPrivateStream)
+		}
+		// If it's not about private show, return the body for parsing
+		// The API might still have useful JSON data
 	}
 
 	return b, err
@@ -211,8 +225,19 @@ func (h *Req) DoRequest(req *http.Request) (string, error) {
 		return "", ErrAgeVerification
 	}
 
+	// For 403 responses, log the body to understand what's happening
 	if resp.StatusCode == http.StatusForbidden {
-		return "", fmt.Errorf("forbidden: %w", ErrPrivateStream)
+		bodyPreview := string(b)
+		if len(bodyPreview) > 500 {
+			bodyPreview = bodyPreview[:500] + "..."
+		}
+		fmt.Printf("[WARN] HTTP 403 in DoRequest - Response body: %s\n", bodyPreview)
+		
+		// Only return ErrPrivateStream if we're sure
+		if strings.Contains(string(b), "private") || strings.Contains(string(b), "Private") {
+			return "", fmt.Errorf("forbidden: %w", ErrPrivateStream)
+		}
+		// Otherwise return the body for parsing
 	}
 
 	return string(b), nil
@@ -332,8 +357,19 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 		return nil, ErrAgeVerification
 	}
 	
+	// For 403 responses with CycleTLS, log the body
 	if response.Status == http.StatusForbidden {
-		return nil, fmt.Errorf("forbidden: %w", ErrPrivateStream)
+		bodyPreview := response.Body
+		if len(bodyPreview) > 500 {
+			bodyPreview = bodyPreview[:500] + "..."
+		}
+		fmt.Printf("[WARN] HTTP 403 in CycleTLS - Response body: %s\n", bodyPreview)
+		
+		// Only return ErrPrivateStream if we're sure
+		if strings.Contains(response.Body, "private") || strings.Contains(response.Body, "Private") {
+			return nil, fmt.Errorf("forbidden: %w", ErrPrivateStream)
+		}
+		// Otherwise return the body for parsing
 	}
 	
 	return body, nil
