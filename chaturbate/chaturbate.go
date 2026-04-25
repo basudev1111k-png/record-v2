@@ -91,33 +91,54 @@ type apiResponse struct {
 }
 
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
-	// IMPORTANT: Visit the room page first to establish session
-	// Chaturbate's API may require this to return hls_source for public streams
-	// This mimics what a real browser does (visit page, then API calls happen)
-	roomURL := fmt.Sprintf("%s%s/", server.Config.Domain, username)
-	if server.Config.Debug {
-		fmt.Printf("[DEBUG] Pre-warming session by visiting room page: %s\n", roomURL)
-	}
-	_, err := client.Get(ctx, roomURL)
+	// IMPORTANT: Visit the homepage first to accept age verification
+	// Then visit the room page to establish session
+	// Chaturbate's API requires this to return hls_source for public streams
+	homeURL := strings.TrimSuffix(server.Config.Domain, "/")
+	fmt.Printf("[DEBUG] %s: Visiting homepage to establish session: %s\n", username, homeURL)
+	_, err := client.Get(ctx, homeURL)
 	if err != nil {
-		// Don't fail if room page visit fails, try API anyway
-		if server.Config.Debug {
-			fmt.Printf("[DEBUG] Room page visit failed (continuing anyway): %v\n", err)
+		fmt.Printf("[WARN] %s: Homepage visit failed: %v\n", username, err)
+	} else {
+		fmt.Printf("[DEBUG] %s: Homepage visit successful\n", username)
+	}
+	
+	// Now visit the specific room page
+	roomURL := fmt.Sprintf("%s%s/", server.Config.Domain, username)
+	fmt.Printf("[DEBUG] %s: Visiting room page: %s\n", username, roomURL)
+	roomBody, err := client.Get(ctx, roomURL)
+	if err != nil {
+		fmt.Printf("[WARN] %s: Room page visit failed: %v\n", username, err)
+	} else {
+		fmt.Printf("[DEBUG] %s: Room page visit successful (body length: %d)\n", username, len(roomBody))
+		// Check if we're getting age verification page
+		if strings.Contains(roomBody, "Verify your age") {
+			fmt.Printf("[ERROR] %s: Age verification page detected - cookies may not be working\n", username)
 		}
 	}
 	
 	apiURL := fmt.Sprintf("%sapi/chatvideocontext/%s/", server.Config.Domain, username)
+	fmt.Printf("[DEBUG] %s: Calling API: %s\n", username, apiURL)
 	body, err := client.Get(ctx, apiURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get stream info: %w", err)
 	}
+	
+	fmt.Printf("[DEBUG] %s: API response received (length: %d)\n", username, len(body))
 
 	var resp apiResponse
 	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		fmt.Printf("[ERROR] %s: Failed to parse API response: %v\n", username, err)
+		fmt.Printf("[ERROR] %s: Raw response: %s\n", username, body)
 		return nil, fmt.Errorf("failed to parse stream info: %w", err)
 	}
+	
+	// ALWAYS log the full API response for debugging
+	fmt.Printf("[INFO] %s: API Response - room_status=%q, hls_source_present=%v, code=%q, num_viewers=%d\n", 
+		username, resp.RoomStatus, resp.HLSSource != "", resp.Code, resp.NumViewers)
 
 	if resp.Code == "unauthorized" {
+		fmt.Printf("[ERROR] %s: Room requires password\n", username)
 		return nil, internal.ErrRoomPasswordRequired
 	}
 
