@@ -320,15 +320,15 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 		cookieStr := strings.TrimSpace(server.Config.Cookies)
 		headers["Cookie"] = cookieStr
 		
-		if server.Config.Debug {
-			// Log cookie preview for debugging
-			preview := cookieStr
-			if len(preview) > 100 {
-				preview = preview[:100] + "..."
-			}
-			fmt.Printf("[DEBUG] CycleTLS cookies: %s\n", preview)
-			fmt.Printf("[DEBUG] CycleTLS X-Requested-With: %s\n", headers["X-Requested-With"])
+		// Always log for debugging age gate issues
+		preview := cookieStr
+		if len(preview) > 100 {
+			preview = preview[:100] + "..."
 		}
+		fmt.Printf("[DEBUG] CycleTLS URL: %s\n", url)
+		fmt.Printf("[DEBUG] CycleTLS cookies: %s\n", preview)
+		fmt.Printf("[DEBUG] CycleTLS X-Requested-With: %s\n", headers["X-Requested-With"])
+		fmt.Printf("[DEBUG] CycleTLS User-Agent: %s\n", server.Config.UserAgent[:minInt(80, len(server.Config.UserAgent))])
 	}
 	
 	// Make request with CycleTLS using Chrome 120 profile
@@ -391,4 +391,12 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 	}
 	
 	return body, nil
+}
+
+// minInt returns the minimum of two integers
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
