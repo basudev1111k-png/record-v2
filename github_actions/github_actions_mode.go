@@ -1,0 +1,769 @@
+package github_actions
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/HeapOfChaos/goondvr/entity"
+	"github.com/urfave/cli/v2"
+)
+
+// GitHubActionsMode represents the configuration and components for running in GitHub Actions mode.
+// It orchestrates all components needed for continuous recording with auto-restart chain pattern.
+type GitHubActionsMode struct {
+	// Configuration
+	MatrixJobID    string
+	SessionID      string
+	Channels       []string
+	MaxQuality     bool
+	CostSavingMode bool
+	
+	// Components
+	ChainManager          *ChainManager
+	StatePersister        *StatePersister
+	MatrixCoordinator     *MatrixCoordinator
+	StorageUploader       *StorageUploader
+	DatabaseManager       *DatabaseManager
+	QualitySelector       *QualitySelector
+	HealthMonitor         *HealthMonitor
+	GracefulShutdown      *GracefulShutdown
+	StreamFailureRecovery *StreamFailureRecovery
+	AdaptivePolling       *AdaptivePolling
+	
+	// Runtime state
+	ctx          context.Context
+	cancel       context.CancelFunc
+	startTime    time.Time
+}
+
+// NewGitHubActionsMode creates a new GitHubActionsMode instance with the specified configuration.
+// It initializes all components needed for GitHub Actions operation.
+func NewGitHubActionsMode(matrixJobID, sessionID string, channels []string, maxQuality, costSavingMode bool) (*GitHubActionsMode, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	
+	mode := &GitHubActionsMode{
+		MatrixJobID:    matrixJobID,
+		SessionID:      sessionID,
+		Channels:       channels,
+		MaxQuality:     maxQuality,
+		CostSavingMode: costSavingMode,
+		ctx:            ctx,
+		cancel:         cancel,
+		startTime:      time.Now(),
+	}
+	
+	// Initialize components
+	if err := mode.initializeComponents(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to initialize components: %w", err)
+	}
+	
+	return mode, nil
+}
+
+// initializeComponents initializes all required components for GitHub Actions mode.
+// Requirements: 5.1, 5.2, 5.5, 5.6, 5.8
+func (gam *GitHubActionsMode) initializeComponents() error {
+	log.Println("Initializing GitHub Actions mode components...")
+	
+	// Get required environment variables
+	githubToken := os.Getenv("GITHUB_TOKEN")
+	if githubToken == "" {
+		return fmt.Errorf("GITHUB_TOKEN environment variable is required")
+	}
+	
+	repository := os.Getenv("GITHUB_REPOSITORY")
+	if repository == "" {
+		return fmt.Errorf("GITHUB_REPOSITORY environment variable is required")
+	}
+	
+	gofileAPIKey := os.Getenv("GOFILE_API_KEY")
+	if gofileAPIKey == "" {
+		return fmt.Errorf("GOFILE_API_KEY environment variable is required")
+	}
+	
+	filesterAPIKey := os.Getenv("FILESTER_API_KEY")
+	if filesterAPIKey == "" {
+		return fmt.Errorf("FILESTER_API_KEY environment variable is required")
+	}
+	
+	// Initialize Chain Manager
+	workflowFile := "continuous-runner.yml"
+	gam.ChainManager = NewChainManager(githubToken, repository, workflowFile)
+	if gam.SessionID == "" {
+		gam.SessionID = gam.ChainManager.GenerateSessionID()
+	} else {
+		// Set the ChainManager's sessionID to match the provided sessionID
+		gam.ChainManager.sessionID = gam.SessionID
+	}
+	log.Printf("Chain Manager initialized with session ID: %s", gam.SessionID)
+	
+	// Initialize State Persister
+	cacheBaseDir := "./state"
+	gam.StatePersister = NewStatePersister(gam.SessionID, gam.MatrixJobID, cacheBaseDir)
+	log.Printf("State Persister initialized with cache base dir: %s", cacheBaseDir)
+	
+	// Initialize Matrix Coordinator
+	gam.MatrixCoordinator = NewMatrixCoordinator(gam.SessionID)
+	log.Printf("Matrix Coordinator initialized for session: %s", gam.SessionID)
+	
+	// Initialize Storage Uploader
+	gam.StorageUploader = NewStorageUploader(gofileAPIKey, filesterAPIKey)
+	log.Println("Storage Uploader initialized with Gofile and Filester API keys")
+	
+	// Initialize Database Manager
+	repoPath := "."
+	gam.DatabaseManager = NewDatabaseManager(repoPath)
+	log.Printf("Database Manager initialized with repo path: %s", repoPath)
+	
+	// Initialize Quality Selector
+	gam.QualitySelector = NewQualitySelector()
+	log.Printf("Quality Selector initialized (preferred: %dp @ %dfps)",
+		gam.QualitySelector.GetPreferredResolution(),
+		gam.QualitySelector.GetPreferredFramerate())
+	
+	// Initialize Health Monitor
+	statusFilePath := "status.json"
+	notifiers := []Notifier{}
+	
+	// Add Discord notifier if webhook URL is provided
+	discordWebhook := os.Getenv("DISCORD_WEBHOOK_URL")
+	if discordWebhook != "" {
+		notifiers = append(notifiers, NewDiscordNotifier(discordWebhook))
+		log.Println("Discord notifier configured")
+	}
+	
+	// Add ntfy notifier if configured
+	ntfyServer := os.Getenv("NTFY_SERVER_URL")
+	ntfyTopic := os.Getenv("NTFY_TOPIC")
+	ntfyToken := os.Getenv("NTFY_TOKEN")
+	if ntfyServer != "" && ntfyTopic != "" {
+		notifiers = append(notifiers, NewNtfyNotifier(ntfyServer, ntfyTopic, ntfyToken))
+		log.Println("Ntfy notifier configured")
+	}
+	
+	gam.HealthMonitor = NewHealthMonitor(statusFilePath, notifiers)
+	log.Printf("Health Monitor initialized with %d notifiers", len(notifiers))
+	
+	// Initialize Graceful Shutdown
+	gam.GracefulShutdown = NewGracefulShutdown(
+		gam.startTime,
+		gam.ChainManager,
+		gam.StatePersister,
+		gam.StorageUploader,
+		gam.MatrixCoordinator,
+		gam.MatrixJobID,
+		"./conf",        // configDir
+		"./videos",      // recordingsDir
+	)
+	log.Println("Graceful Shutdown initialized")
+	
+	// Initialize Stream Failure Recovery
+	retryInterval := 5 * time.Minute // Default retry interval
+	gam.StreamFailureRecovery = NewStreamFailureRecovery(
+		gam.HealthMonitor,
+		gam.SessionID,
+		gam.MatrixJobID,
+		retryInterval,
+	)
+	log.Printf("Stream Failure Recovery initialized with retry interval: %s", retryInterval)
+	
+	// Initialize Adaptive Polling
+	// Get the normal polling interval from server config, default to 1 minute if not set
+	normalInterval := 1
+	if os.Getenv("POLLING_INTERVAL") != "" {
+		// Try to parse from environment variable
+		if parsed, err := time.ParseDuration(os.Getenv("POLLING_INTERVAL")); err == nil {
+			normalInterval = int(parsed.Minutes())
+		}
+	}
+	
+	// Create adaptive polling with cost-saving mode support
+	gam.AdaptivePolling = NewAdaptivePollingWithCostSaving(normalInterval, gam.CostSavingMode)
+	
+	if gam.CostSavingMode {
+		log.Printf("Adaptive Polling initialized in COST-SAVING MODE (polling: %d min)",
+			gam.AdaptivePolling.GetCostSavingInterval())
+	} else {
+		log.Printf("Adaptive Polling initialized (normal: %d min, reduced: %d min)",
+			gam.AdaptivePolling.GetNormalInterval(),
+			gam.AdaptivePolling.GetReducedInterval())
+	}
+	
+	log.Println("All components initialized successfully")
+	return nil
+}
+
+// GetContext returns the context for this GitHub Actions mode instance.
+func (gam *GitHubActionsMode) GetContext() context.Context {
+	return gam.ctx
+}
+
+// Cancel cancels the context for this GitHub Actions mode instance.
+func (gam *GitHubActionsMode) Cancel() {
+	gam.cancel()
+}
+
+// GetStartTime returns the start time of this GitHub Actions mode instance.
+func (gam *GitHubActionsMode) GetStartTime() time.Time {
+	return gam.startTime
+}
+
+// AddGitHubActionsModeFlags adds command-line flags for GitHub Actions mode to the CLI app.
+// This should be called when setting up the CLI application to add the necessary flags.
+//
+// Requirements: 5.1, 5.2, 5.5, 5.6, 5.8, 10.6, 12.5
+func AddGitHubActionsModeFlags(app *cli.App) {
+	app.Flags = append(app.Flags,
+		&cli.StringFlag{
+			Name:  "mode",
+			Usage: "Operation mode: 'normal' or 'github-actions'",
+			Value: "normal",
+		},
+		&cli.StringFlag{
+			Name:  "matrix-job-id",
+			Usage: "Matrix job identifier (required for github-actions mode)",
+			Value: "",
+		},
+		&cli.StringFlag{
+			Name:  "session-id",
+			Usage: "Session identifier for workflow run (auto-generated if not provided)",
+			Value: "",
+		},
+		&cli.StringFlag{
+			Name:  "channels",
+			Usage: "Comma-separated list of channels to record (required for github-actions mode)",
+			Value: "",
+		},
+		&cli.BoolFlag{
+			Name:  "max-quality",
+			Usage: "Enable maximum quality recording (4K 60fps with fallback)",
+			Value: false,
+		},
+		&cli.BoolFlag{
+			Name:  "cost-saving",
+			Usage: "Enable cost-saving mode (10-minute polling, limit to 2 concurrent channels)",
+			Value: false,
+		},
+		&cli.BoolFlag{
+			Name:  "validate-setup",
+			Usage: "Validate configuration and secrets without starting recordings",
+			Value: false,
+		},
+	)
+}
+
+// ParseGitHubActionsModeConfig parses command-line flags and environment variables
+// to create a GitHubActionsMode configuration. It validates required parameters
+// and returns an error if any are missing.
+//
+// Requirements: 5.1, 5.2, 5.5, 5.6, 5.8, 5.9, 5.11
+func ParseGitHubActionsModeConfig(c *cli.Context) (*GitHubActionsMode, error) {
+	// Check if we're in GitHub Actions mode
+	mode := c.String("mode")
+	if mode != "github-actions" {
+		return nil, fmt.Errorf("not in github-actions mode")
+	}
+	
+	// Check if we're in validate-setup mode
+	if c.Bool("validate-setup") {
+		return nil, ValidateSetupMode(c)
+	}
+	
+	// Parse matrix job ID
+	matrixJobID := c.String("matrix-job-id")
+	if matrixJobID == "" {
+		// Try to get from environment variable
+		matrixJobID = os.Getenv("MATRIX_JOB_ID")
+		if matrixJobID == "" {
+			return nil, fmt.Errorf("--matrix-job-id flag or MATRIX_JOB_ID environment variable is required")
+		}
+	}
+	
+	// Parse session ID (optional, will be auto-generated if not provided)
+	sessionID := c.String("session-id")
+	if sessionID == "" {
+		sessionID = os.Getenv("SESSION_ID")
+	}
+	
+	// Parse channels
+	channelsStr := c.String("channels")
+	if channelsStr == "" {
+		// Try to get from environment variable
+		channelsStr = os.Getenv("CHANNELS")
+		if channelsStr == "" {
+			return nil, fmt.Errorf("--channels flag or CHANNELS environment variable is required")
+		}
+	}
+	
+	// Split channels by comma and trim whitespace
+	channels := []string{}
+	for _, ch := range strings.Split(channelsStr, ",") {
+		ch = strings.TrimSpace(ch)
+		if ch != "" {
+			channels = append(channels, ch)
+		}
+	}
+	
+	// Parse matrix job count from environment variable (set by workflow)
+	matrixJobCountStr := os.Getenv("MATRIX_JOB_COUNT")
+	matrixJobCount := len(channels) // Default to number of channels if not set
+	if matrixJobCountStr != "" {
+		validator := NewConfigValidator()
+		parsed, err := validator.ParseMatrixJobCount(matrixJobCountStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid matrix_job_count: %w", err)
+		}
+		matrixJobCount = parsed
+	}
+	
+	// Validate workflow inputs using ConfigValidator
+	log.Println("Validating workflow configuration inputs...")
+	validator := NewConfigValidator()
+	validationResult := validator.ValidateWorkflowInputs(channels, matrixJobCount)
+	if !validationResult.Valid {
+		log.Println("Configuration validation failed:")
+		for _, err := range validationResult.Errors {
+			log.Printf("  - %s", err)
+		}
+		return nil, fmt.Errorf("configuration validation failed: %d errors found", len(validationResult.Errors))
+	}
+	log.Println("Configuration validation passed")
+	
+	// Parse max quality flag
+	maxQuality := c.Bool("max-quality")
+	
+	// Parse cost-saving flag
+	costSavingMode := c.Bool("cost-saving")
+	
+	// Log cost-saving mode status
+	if costSavingMode {
+		log.Println("Cost-saving mode ENABLED: polling frequency will be 10 minutes, concurrent recordings limited to 2 channels")
+	}
+	
+	// Create and initialize GitHubActionsMode
+	log.Printf("Creating GitHub Actions mode with matrix job ID: %s, channels: %v, max quality: %v, cost-saving: %v",
+		matrixJobID, channels, maxQuality, costSavingMode)
+	
+	gam, err := NewGitHubActionsMode(matrixJobID, sessionID, channels, maxQuality, costSavingMode)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GitHub Actions mode: %w", err)
+	}
+	
+	return gam, nil
+}
+
+// ValidateSetupMode performs comprehensive validation of all required secrets and configuration
+// for GitHub Actions mode without starting recordings. This is used by the --validate-setup flag.
+//
+// It validates:
+// - All required environment variables (GITHUB_TOKEN, GITHUB_REPOSITORY, GOFILE_API_KEY, FILESTER_API_KEY)
+// - Channels list is not empty
+// - Matrix job count is within valid range (1-20)
+// - Optional notification configuration (Discord, ntfy)
+//
+// Returns an error if validation fails, nil if all checks pass.
+//
+// Requirements: 10.6
+func ValidateSetupMode(c *cli.Context) error {
+	log.Println("=== GitHub Actions Setup Validation ===")
+	log.Println()
+	
+	// Parse channels
+	channelsStr := c.String("channels")
+	if channelsStr == "" {
+		channelsStr = os.Getenv("CHANNELS")
+	}
+	
+	// Split channels by comma and trim whitespace
+	channels := []string{}
+	for _, ch := range strings.Split(channelsStr, ",") {
+		ch = strings.TrimSpace(ch)
+		if ch != "" {
+			channels = append(channels, ch)
+		}
+	}
+	
+	// Parse matrix job count from environment variable (set by workflow)
+	matrixJobCountStr := os.Getenv("MATRIX_JOB_COUNT")
+	matrixJobCount := len(channels) // Default to number of channels if not set
+	if matrixJobCountStr != "" {
+		validator := NewConfigValidator()
+		parsed, err := validator.ParseMatrixJobCount(matrixJobCountStr)
+		if err != nil {
+			log.Printf("❌ Invalid MATRIX_JOB_COUNT: %v", err)
+			matrixJobCount = 0 // Set to invalid value to trigger validation error
+		} else {
+			matrixJobCount = parsed
+		}
+	}
+	
+	// Perform comprehensive validation
+	validator := NewConfigValidator()
+	validationResult := validator.ValidateSetup(channels, matrixJobCount)
+	
+	// Display validation results
+	log.Println("Validation Results:")
+	log.Println("-------------------")
+	
+	if validationResult.Valid {
+		log.Println("✅ All validation checks passed!")
+		log.Println()
+		log.Println("Configuration Summary:")
+		log.Printf("  - Channels: %v", channels)
+		log.Printf("  - Matrix Job Count: %d", matrixJobCount)
+		log.Printf("  - GITHUB_TOKEN: %s", maskSecret(os.Getenv("GITHUB_TOKEN")))
+		log.Printf("  - GITHUB_REPOSITORY: %s", os.Getenv("GITHUB_REPOSITORY"))
+		log.Printf("  - GOFILE_API_KEY: %s", maskSecret(os.Getenv("GOFILE_API_KEY")))
+		log.Printf("  - FILESTER_API_KEY: %s", maskSecret(os.Getenv("FILESTER_API_KEY")))
+		
+		// Display optional notification configuration
+		discordWebhook := os.Getenv("DISCORD_WEBHOOK_URL")
+		ntfyServer := os.Getenv("NTFY_SERVER_URL")
+		ntfyTopic := os.Getenv("NTFY_TOPIC")
+		
+		log.Println()
+		log.Println("Optional Notification Configuration:")
+		if discordWebhook != "" {
+			log.Printf("  - Discord Webhook: %s", maskSecret(discordWebhook))
+		} else {
+			log.Println("  - Discord Webhook: Not configured")
+		}
+		
+		if ntfyServer != "" && ntfyTopic != "" {
+			log.Printf("  - Ntfy Server: %s", ntfyServer)
+			log.Printf("  - Ntfy Topic: %s", ntfyTopic)
+			ntfyToken := os.Getenv("NTFY_TOKEN")
+			if ntfyToken != "" {
+				log.Printf("  - Ntfy Token: %s", maskSecret(ntfyToken))
+			} else {
+				log.Println("  - Ntfy Token: Not configured (optional)")
+			}
+		} else {
+			log.Println("  - Ntfy: Not configured")
+		}
+		
+		log.Println()
+		log.Println("✅ Setup validation completed successfully!")
+		log.Println("You can now run the workflow without --validate-setup to start recordings.")
+		return nil
+	}
+	
+	// Validation failed - display all errors
+	log.Printf("❌ Validation failed with %d error(s):", len(validationResult.Errors))
+	log.Println()
+	for i, err := range validationResult.Errors {
+		log.Printf("  %d. %s", i+1, err)
+	}
+	log.Println()
+	log.Println("Please fix the above errors before running the workflow.")
+	
+	return fmt.Errorf("setup validation failed: %d errors found", len(validationResult.Errors))
+}
+
+// maskSecret masks a secret string for display, showing only the first 4 and last 4 characters.
+// If the secret is empty or too short, it returns appropriate placeholder text.
+func maskSecret(secret string) string {
+	if secret == "" {
+		return "<not set>"
+	}
+	if len(secret) <= 8 {
+		return "****"
+	}
+	return secret[:4] + "****" + secret[len(secret)-4:]
+}
+
+// ApplyQualityToChannelConfig applies the maximum quality settings to a channel configuration.
+// This is a helper method that uses the QualitySelector to determine and apply the best quality.
+//
+// When max quality is enabled, this method:
+// 1. Determines the best available quality using the quality selector
+// 2. Overrides any existing resolution and framerate settings in the channel config
+// 3. Logs the actual quality being applied
+//
+// Requirements: 16.1, 16.2, 16.8, 16.10
+func (gam *GitHubActionsMode) ApplyQualityToChannelConfig(config *entity.ChannelConfig) error {
+	if !gam.MaxQuality {
+		log.Printf("Max quality not enabled, using default quality settings for channel %s (resolution: %dp, framerate: %dfps)", 
+			config.Username, config.Resolution, config.Framerate)
+		return nil
+	}
+	
+	// For now, we'll use a default set of available qualities
+	// In a real implementation, this would detect qualities from the stream
+	// using DetectAvailableQualities() when the stream URL is available
+	availableQualities := []Quality{
+		{Resolution: 2160, Framerate: 60},
+		{Resolution: 1080, Framerate: 60},
+		{Resolution: 720, Framerate: 60},
+		{Resolution: 720, Framerate: 30},
+	}
+	
+	// Select the best quality using the quality selector's fallback chain
+	// Priority: 2160p60 → 1080p60 → 720p60 → highest available
+	settings := gam.QualitySelector.SelectQuality(availableQualities)
+	
+	// Apply the quality settings to the channel config
+	// This overrides any existing resolution and framerate settings (Requirement 16.10)
+	gam.QualitySelector.ApplyQualitySettings(config, settings)
+	
+	log.Printf("Applied maximum quality settings to channel %s: %s (resolution: %dp, framerate: %dfps)", 
+		config.Username, settings.Actual, settings.Resolution, settings.Framerate)
+	return nil
+}
+
+// CreateChannelConfigWithQuality creates a channel configuration with quality settings applied.
+// This method creates a base configuration and then applies maximum quality settings if enabled.
+//
+// The base configuration includes:
+// - Username and site from parameters
+// - Default pattern for file naming
+// - Default max duration and filesize limits
+// - Initial resolution and framerate (will be overridden if max quality is enabled)
+//
+// Requirements: 16.1, 16.2, 16.8, 16.10
+func (gam *GitHubActionsMode) CreateChannelConfigWithQuality(username, site string) (*entity.ChannelConfig, error) {
+	// Create base channel configuration with default settings
+	config := &entity.ChannelConfig{
+		IsPaused:    false,
+		Username:    username,
+		Site:        site,
+		Framerate:   30,  // Default framerate (will be overridden if max quality is enabled)
+		Resolution:  1080, // Default resolution (will be overridden if max quality is enabled)
+		Pattern:     "videos/{{if ne .Site \"chaturbate\"}}{{.Site}}/{{end}}{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}",
+		MaxDuration: 0, // No duration limit by default
+		MaxFilesize: 0, // No filesize limit by default
+	}
+	
+	// Apply maximum quality settings if enabled
+	// This will override the default resolution and framerate
+	if err := gam.ApplyQualityToChannelConfig(config); err != nil {
+		return nil, fmt.Errorf("failed to apply quality settings: %w", err)
+	}
+	
+	return config, nil
+}
+
+// GetAssignedChannel returns the channel assigned to this matrix job.
+// Each matrix job handles exactly one channel.
+func (gam *GitHubActionsMode) GetAssignedChannel() (string, error) {
+	// In the matrix strategy, each job gets one channel
+	// The matrix job ID determines which channel this job handles
+	// For now, we'll use a simple approach: parse the job ID to get the index
+	
+	// Matrix job IDs are in format "matrix-job-N" where N is 1-indexed
+	var jobIndex int
+	_, err := fmt.Sscanf(gam.MatrixJobID, "matrix-job-%d", &jobIndex)
+	if err != nil {
+		return "", fmt.Errorf("invalid matrix job ID format: %s", gam.MatrixJobID)
+	}
+	
+	// Convert to 0-indexed
+	jobIndex--
+	
+	if jobIndex < 0 || jobIndex >= len(gam.Channels) {
+		return "", fmt.Errorf("matrix job index %d out of range for %d channels", jobIndex+1, len(gam.Channels))
+	}
+	
+	return gam.Channels[jobIndex], nil
+}
+
+// GetActiveRecordingsCount returns the count of currently active recordings.
+// This is used by the adaptive polling monitor to determine if the polling interval
+// should be reduced or restored to normal.
+//
+// In the GitHub Actions mode, each matrix job handles exactly one channel,
+// so this method checks if that channel is currently recording.
+//
+// Returns:
+//   - int: Number of active recordings (0 or 1 for a single matrix job)
+//
+// Requirements: 9.1
+func (gam *GitHubActionsMode) GetActiveRecordingsCount() int {
+	// TODO: Implement actual logic to check if the assigned channel is recording
+	// This would require integration with the channel manager or recording state
+	// For now, we return 0 as a placeholder
+	
+	// In a real implementation, this would:
+	// 1. Get the assigned channel for this matrix job
+	// 2. Check if that channel is currently online and recording
+	// 3. Return 1 if recording, 0 if not
+	
+	return 0
+}
+
+// ShouldLimitConcurrentRecordings returns whether concurrent recordings should be limited
+// based on cost-saving mode. When cost-saving mode is enabled, only 2 concurrent recordings
+// are allowed across all matrix jobs.
+//
+// Returns:
+//   - bool: true if concurrent recordings should be limited, false otherwise
+//
+// Requirements: 12.5, 12.7
+func (gam *GitHubActionsMode) ShouldLimitConcurrentRecordings() bool {
+	return gam.CostSavingMode
+}
+
+// GetMaxConcurrentRecordings returns the maximum number of concurrent recordings allowed.
+// In cost-saving mode, this is limited to 2 channels. Otherwise, it returns the total
+// number of channels (no limit).
+//
+// Returns:
+//   - int: Maximum number of concurrent recordings allowed
+//
+// Requirements: 12.7
+func (gam *GitHubActionsMode) GetMaxConcurrentRecordings() int {
+	if gam.CostSavingMode {
+		return 2 // Limit to 2 concurrent recordings in cost-saving mode
+	}
+	return len(gam.Channels) // No limit in normal mode
+}
+
+// IsCostSavingMode returns whether cost-saving mode is enabled.
+//
+// Returns:
+//   - bool: true if cost-saving mode is enabled, false otherwise
+//
+// Requirements: 12.5
+func (gam *GitHubActionsMode) IsCostSavingMode() bool {
+	return gam.CostSavingMode
+}
+
+// StartWorkflowLifecycle implements the workflow lifecycle management for GitHub Actions mode.
+// It performs the following operations:
+// 1. Restores state from cache on startup
+// 2. Starts Chain Manager runtime monitoring in background goroutine
+// 3. Starts Health Monitor disk space monitoring in background goroutine
+// 4. Starts Graceful Shutdown monitoring in background goroutine
+// 5. Registers matrix job with Matrix Coordinator
+//
+// This method should be called after initializing GitHubActionsMode to start the workflow.
+// It returns an error if any critical initialization step fails.
+//
+// Requirements: 2.1, 4.1, 7.1, 13.4, 17.9
+func (gam *GitHubActionsMode) StartWorkflowLifecycle(configDir, recordingsDir string) error {
+	log.Println("Starting workflow lifecycle management...")
+	
+	// Step 1: Restore state from cache on startup
+	log.Println("Restoring state from cache...")
+	err := gam.StatePersister.RestoreState(gam.ctx, configDir, recordingsDir)
+	if err != nil {
+		if IsCacheMiss(err) {
+			log.Println("Cache miss detected (expected for first run), initializing with default state")
+			// This is expected for the first workflow run - continue with default state
+		} else {
+			log.Printf("Warning: cache restoration failed: %v", err)
+			log.Println("Continuing with default state")
+			// Continue operation even if cache restoration fails (Requirement 2.7)
+		}
+	} else {
+		log.Println("State restored successfully from cache")
+	}
+	
+	// Step 2: Register matrix job with Matrix Coordinator
+	log.Printf("Registering matrix job %s with Matrix Coordinator...", gam.MatrixJobID)
+	assignedChannel, err := gam.GetAssignedChannel()
+	if err != nil {
+		return fmt.Errorf("failed to get assigned channel: %w", err)
+	}
+	
+	err = gam.MatrixCoordinator.RegisterJob(gam.MatrixJobID, assignedChannel)
+	if err != nil {
+		return fmt.Errorf("failed to register matrix job: %w", err)
+	}
+	log.Printf("Matrix job %s registered successfully for channel: %s", gam.MatrixJobID, assignedChannel)
+	
+	// Step 3: Start Chain Manager runtime monitoring in background goroutine
+	log.Println("Starting Chain Manager runtime monitoring in background...")
+	go func() {
+		// Create a state provider function that returns current session state
+		stateProvider := func() SessionState {
+			return SessionState{
+				SessionID:         gam.SessionID,
+				StartTime:         gam.startTime,
+				Channels:          gam.Channels,
+				PartialRecordings: []PartialRecording{}, // TODO: populate with actual partial recordings
+				Configuration:     make(map[string]interface{}),
+				MatrixJobCount:    len(gam.Channels),
+			}
+		}
+		
+		err := gam.ChainManager.MonitorRuntime(gam.ctx, stateProvider)
+		if err != nil && err != context.Canceled {
+			log.Printf("Chain Manager monitoring error: %v", err)
+		} else {
+			log.Println("Chain Manager monitoring completed successfully")
+		}
+	}()
+	log.Println("Chain Manager runtime monitoring started")
+	
+	// Step 4: Start Health Monitor disk space monitoring in background goroutine
+	log.Println("Starting Health Monitor disk space monitoring in background...")
+	go func() {
+		// For now, we'll use the recordings directory for disk monitoring
+		// In a real implementation, this would be configurable
+		monitoringDir := recordingsDir
+		if monitoringDir == "" {
+			monitoringDir = "./videos" // Default recordings directory
+		}
+		
+		// Create a function to stop the oldest recording (placeholder for now)
+		stopOldestRecordingFunc := func() error {
+			log.Println("Stop oldest recording requested by Health Monitor")
+			// TODO: implement actual recording stop logic
+			return nil
+		}
+		
+		err := gam.HealthMonitor.MonitorDiskSpace(gam.ctx, monitoringDir, gam.StorageUploader, stopOldestRecordingFunc)
+		if err != nil && err != context.Canceled {
+			log.Printf("Health Monitor disk space monitoring error: %v", err)
+		} else {
+			log.Println("Health Monitor disk space monitoring completed")
+		}
+	}()
+	log.Println("Health Monitor disk space monitoring started")
+	
+	// Step 5: Start Graceful Shutdown monitoring in background goroutine
+	log.Println("Starting Graceful Shutdown monitoring in background...")
+	go func() {
+		config := DefaultShutdownConfig()
+		err := gam.GracefulShutdown.MonitorAndShutdown(gam.ctx, config)
+		if err != nil && err != context.Canceled {
+			log.Printf("Graceful Shutdown monitoring error: %v", err)
+		} else {
+			log.Println("Graceful Shutdown monitoring completed successfully")
+		}
+	}()
+	log.Println("Graceful Shutdown monitoring started")
+	
+	// Step 6: Start Adaptive Polling monitoring in background goroutine
+	log.Println("Starting Adaptive Polling monitoring in background...")
+	go func() {
+		// Use the GitHubActionsMode's GetActiveRecordingsCount method
+		err := gam.AdaptivePolling.MonitorAndAdjust(gam.ctx, gam.GetActiveRecordingsCount)
+		if err != nil && err != context.Canceled {
+			log.Printf("Adaptive Polling monitoring error: %v", err)
+		} else {
+			log.Println("Adaptive Polling monitoring completed")
+		}
+	}()
+	log.Println("Adaptive Polling monitoring started")
+	
+	// Send workflow start notification
+	err = gam.HealthMonitor.SendNotification(
+		"Workflow Started",
+		fmt.Sprintf("Matrix job %s started for channel %s (Session: %s)",
+			gam.MatrixJobID, assignedChannel, gam.SessionID),
+	)
+	if err != nil {
+		log.Printf("Warning: failed to send workflow start notification: %v", err)
+		// Continue even if notification fails
+	}
+	
+	log.Println("Workflow lifecycle management started successfully")
+	return nil
+}

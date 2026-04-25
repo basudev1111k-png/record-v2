@@ -1,0 +1,279 @@
+name: GoondVR Continuous Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_state:
+        description: 'Session state from previous run (JSON)'
+        required: false
+        type: string
+        default: ''
+      channels:
+        description: 'Comma-separated list of channels to record (format: site:username)'
+        required: true
+        type: string
+      matrix_job_count:
+        description: 'Number of parallel matrix jobs (1-20)'
+        required: false
+        type: string
+        default: '5'
+      cost_saving:
+        description: 'Enable cost-saving mode (10-minute polling, limit to 2 concurrent channels)'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  validate:
+    name: Validate Configuration
+    runs-on: ubuntu-latest
+    outputs:
+      matrix_jobs: ${{ steps.generate_matrix.outputs.matrix_jobs }}
+      session_id: ${{ steps.generate_session.outputs.session_id }}
+    steps:
+      - name: Validate inputs
+        id: validate
+        run: |
+          # Validate matrix_job_count is between 1 and 20
+          MATRIX_COUNT="${{ inputs.matrix_job_count }}"
+          if ! [[ "$MATRIX_COUNT" =~ ^[0-9]+$ ]]; then
+            echo "Error: matrix_job_count must be a number"
+            exit 1
+          fi
+          if [ "$MATRIX_COUNT" -lt 1 ] || [ "$MATRIX_COUNT" -gt 20 ]; then
+            echo "Error: matrix_job_count must be between 1 and 20"
+            exit 1
+          fi
+          
+          # In cost-saving mode, limit matrix_job_count to 2
+          if [ "${{ inputs.cost_saving }}" = "true" ]; then
+            if [ "$MATRIX_COUNT" -gt 2 ]; then
+              echo "Warning: Cost-saving mode enabled, limiting matrix jobs to 2 (requested: $MATRIX_COUNT)"
+              MATRIX_COUNT=2
+            fi
+            echo "Cost-saving mode ENABLED: 10-minute polling, max 2 concurrent channels"
+          fi
+          
+          # Validate channels input is not empty
+          if [ -z "${{ inputs.channels }}" ]; then
+            echo "Error: channels input cannot be empty"
+            exit 1
+          fi
+          
+          echo "Validation passed: $MATRIX_COUNT matrix jobs for channels: ${{ inputs.channels }}"
+          echo "validated_matrix_count=$MATRIX_COUNT" >> $GITHUB_OUTPUT
+      
+      - name: Generate session ID
+        id: generate_session
+        run: |
+          # Generate unique session ID using run ID and timestamp
+          SESSION_ID="run-$(date +%Y%m%d-%H%M%S)-${{ github.run_id }}"
+          echo "session_id=$SESSION_ID" >> $GITHUB_OUTPUT
+          echo "Generated session ID: $SESSION_ID"
+      
+      - name: Generate matrix configuration
+        id: generate_matrix
+        run: |
+          # Generate matrix job IDs based on validated matrix_job_count
+          MATRIX_COUNT="${{ steps.validate.outputs.validated_matrix_count }}"
+          MATRIX_JOBS=$(seq 1 $MATRIX_COUNT | jq -R . | jq -s -c .)
+          echo "matrix_jobs=$MATRIX_JOBS" >> $GITHUB_OUTPUT
+          echo "Generated matrix jobs: $MATRIX_JOBS"
+
+  record:
+    name: Record (Job ${{ matrix.job_id }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 330  # 5.5 hours (5 hours 30 minutes)
+    strategy:
+      matrix:
+        job_id: ${{ fromJson(needs.validate.outputs.matrix_jobs) }}
+      fail-fast: false  # Continue other jobs even if one fails
+      max-parallel: 20  # Allow up to 20 concurrent jobs
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      # Cache Compression Strategy:
+      # - Uses zstd compression with level 19 (maximum without --ultra flag)
+      # - Compression level 19 can reduce cache size by up to 10x compared to default
+      # - This maximizes the effective use of GitHub's 10 GB cache limit
+      # - Higher compression levels (20-22) require --ultra flag and are not supported
+      # - Compression is applied to both restore and save operations for consistency
+      
+      - name: Restore shared configuration cache
+        uses: actions/cache/restore@v4
+        id: restore_shared_config
+        env:
+          ZSTD_CLEVEL: 19  # Maximum compression level for zstd (1-19)
+        with:
+          path: |
+            ./conf
+          key: shared-config-latest
+          restore-keys: |
+            shared-config-
+      
+      - name: Restore job-specific state cache
+        uses: actions/cache/restore@v4
+        id: restore_job_state
+        env:
+          ZSTD_CLEVEL: 19  # Maximum compression level for zstd (1-19)
+        with:
+          path: |
+            ./videos
+            ./state
+            ./partial
+          key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job_id }}
+          restore-keys: |
+            state-${{ inputs.session_state }}-job-${{ matrix.job_id }}
+            state-latest-job-${{ matrix.job_id }}
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+      
+      - name: Install dependencies
+        run: |
+          go mod download
+          echo "Dependencies installed successfully"
+      
+      - name: Initialize state
+        run: |
+          # Create necessary directories
+          mkdir -p ./conf ./videos ./state ./partial ./database
+          
+          # Log cache restoration status
+          echo "Shared config cache hit: ${{ steps.restore_shared_config.outputs.cache-hit }}"
+          echo "Job state cache hit: ${{ steps.restore_job_state.outputs.cache-hit }}"
+          
+          # If no cache hit, initialize with defaults
+          if [ "${{ steps.restore_shared_config.outputs.cache-hit }}" != "true" ]; then
+            echo "No shared config cache found, will initialize with defaults"
+          fi
+          
+          if [ "${{ steps.restore_job_state.outputs.cache-hit }}" != "true" ]; then
+            echo "No job state cache found, starting fresh"
+          fi
+      
+      - name: Start recording
+        env:
+          GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
+          FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          MATRIX_JOB_ID: ${{ matrix.job_id }}
+          MATRIX_JOB_COUNT: ${{ steps.validate.outputs.validated_matrix_count }}
+          SESSION_ID: ${{ needs.validate.outputs.session_id }}
+          CHANNELS: ${{ inputs.channels }}
+          SESSION_STATE: ${{ inputs.session_state }}
+          COST_SAVING: ${{ inputs.cost_saving }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          echo "Starting GoondVR in GitHub Actions mode"
+          echo "Session ID: $SESSION_ID"
+          echo "Matrix Job ID: $MATRIX_JOB_ID"
+          echo "Channels: $CHANNELS"
+          echo "Cost-saving mode: $COST_SAVING"
+          
+          # TODO: Implement GitHub Actions mode in main.go
+          # This will be implemented in subsequent tasks
+          # go run main.go \
+          #   --mode github-actions \
+          #   --matrix-job-id $MATRIX_JOB_ID \
+          #   --session-id $SESSION_ID \
+          #   --channels "$CHANNELS" \
+          #   --max-quality \
+          #   --cost-saving=$COST_SAVING
+          
+          echo "Recording mode not yet implemented - placeholder for Task 1"
+          echo "Workflow infrastructure is ready for implementation"
+      
+      - name: Save shared configuration cache
+        if: always()
+        uses: actions/cache/save@v4
+        env:
+          ZSTD_CLEVEL: 19  # Maximum compression level for zstd (1-19)
+        with:
+          path: |
+            ./conf
+          key: shared-config-latest
+      
+      - name: Save job-specific state cache
+        if: always()
+        uses: actions/cache/save@v4
+        env:
+          ZSTD_CLEVEL: 19  # Maximum compression level for zstd (1-19)
+        with:
+          path: |
+            ./videos
+            ./state
+            ./partial
+          key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job_id }}
+      
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recordings-job-${{ matrix.job_id }}-${{ github.run_id }}
+          path: |
+            ./videos/**/*
+            ./state/**/*
+            ./logs/**/*
+          retention-days: 7
+          if-no-files-found: ignore
+      
+      - name: Update status file
+        if: always()
+        run: |
+          # Create status directory if it doesn't exist
+          mkdir -p ./status
+          
+          # Generate status file with current job information
+          cat > ./status/job-${{ matrix.job_id }}.json << EOF
+          {
+            "job_id": "${{ matrix.job_id }}",
+            "session_id": "${{ needs.validate.outputs.session_id }}",
+            "run_id": "${{ github.run_id }}",
+            "status": "${{ job.status }}",
+            "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "runner": "${{ runner.os }}"
+          }
+          EOF
+          
+          echo "Status file created for job ${{ matrix.job_id }}"
+
+  summary:
+    name: Workflow Summary
+    needs: [validate, record]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## GoondVR Continuous Runner Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Session ID:** ${{ needs.validate.outputs.session_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Matrix Jobs:** ${{ steps.validate.outputs.validated_matrix_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Channels:** ${{ inputs.channels }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Cost-Saving Mode:** ${{ inputs.cost_saving }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ needs.record.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ inputs.cost_saving }}" = "true" ]; then
+            echo "### Cost-Saving Mode Active" >> $GITHUB_STEP_SUMMARY
+            echo "- Polling frequency: 10 minutes" >> $GITHUB_STEP_SUMMARY
+            echo "- Concurrent recordings: Limited to 2 channels" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "- The auto-restart chain will be implemented in subsequent tasks" >> $GITHUB_STEP_SUMMARY
+          echo "- Recording functionality will be added in Task 2" >> $GITHUB_STEP_SUMMARY
+          echo "- Upload functionality will be added in Task 3" >> $GITHUB_STEP_SUMMARY
