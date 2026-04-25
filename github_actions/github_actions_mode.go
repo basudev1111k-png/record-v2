@@ -241,8 +241,8 @@ func AddGitHubActionsModeFlags(app *cli.App) {
 		},
 		&cli.BoolFlag{
 			Name:  "max-quality",
-			Usage: "Enable maximum quality recording (4K 60fps with fallback)",
-			Value: false,
+			Usage: "Enable maximum quality recording (4K 60fps with fallback) - DEPRECATED: Maximum quality is now enabled by default",
+			Value: true, // Changed to true - maximum quality is now the default
 		},
 		&cli.BoolFlag{
 			Name:  "cost-saving",
@@ -334,8 +334,8 @@ func ParseGitHubActionsModeConfig(c *cli.Context) (*GitHubActionsMode, error) {
 	}
 	log.Println("Configuration validation passed")
 	
-	// Parse max quality flag
-	maxQuality := c.Bool("max-quality")
+	// Parse max quality flag (kept for backwards compatibility, but always true now)
+	maxQuality := true // Maximum quality is now ALWAYS enabled by default
 	
 	// Parse cost-saving flag
 	costSavingMode := c.Bool("cost-saving")
@@ -346,8 +346,8 @@ func ParseGitHubActionsModeConfig(c *cli.Context) (*GitHubActionsMode, error) {
 	}
 	
 	// Create and initialize GitHubActionsMode
-	log.Printf("Creating GitHub Actions mode with matrix job ID: %s, channels: %v, max quality: %v, cost-saving: %v",
-		matrixJobID, channels, maxQuality, costSavingMode)
+	log.Printf("Creating GitHub Actions mode with matrix job ID: %s, channels: %v, max quality: ENABLED (default), cost-saving: %v",
+		matrixJobID, channels, costSavingMode)
 	
 	gam, err := NewGitHubActionsMode(matrixJobID, sessionID, channels, maxQuality, costSavingMode)
 	if err != nil {
@@ -480,18 +480,18 @@ func maskSecret(secret string) string {
 // ApplyQualityToChannelConfig applies the maximum quality settings to a channel configuration.
 // This is a helper method that uses the QualitySelector to determine and apply the best quality.
 //
-// When max quality is enabled, this method:
+// This method ALWAYS applies maximum quality settings (enabled by default):
 // 1. Determines the best available quality using the quality selector
 // 2. Overrides any existing resolution and framerate settings in the channel config
 // 3. Logs the actual quality being applied
 //
+// The quality selector uses a fallback chain to prioritize the highest available quality
+// up to 4K 60fps: 2160p60 → 1080p60 → 720p60 → highest available
+//
 // Requirements: 16.1, 16.2, 16.8, 16.10
 func (gam *GitHubActionsMode) ApplyQualityToChannelConfig(config *entity.ChannelConfig) error {
-	if !gam.MaxQuality {
-		log.Printf("Max quality not enabled, using default quality settings for channel %s (resolution: %dp, framerate: %dfps)", 
-			config.Username, config.Resolution, config.Framerate)
-		return nil
-	}
+	// Maximum quality is now ALWAYS enabled by default
+	// The --max-quality flag is kept for backwards compatibility but has no effect
 	
 	// For now, we'll use a default set of available qualities
 	// In a real implementation, this would detect qualities from the stream
@@ -517,13 +517,16 @@ func (gam *GitHubActionsMode) ApplyQualityToChannelConfig(config *entity.Channel
 }
 
 // CreateChannelConfigWithQuality creates a channel configuration with quality settings applied.
-// This method creates a base configuration and then applies maximum quality settings if enabled.
+// This method creates a base configuration and then applies maximum quality settings.
+//
+// Maximum quality is ALWAYS enabled by default, prioritizing the highest available quality
+// up to 4K 60fps using the fallback chain: 2160p60 → 1080p60 → 720p60 → highest available
 //
 // The base configuration includes:
 // - Username and site from parameters
 // - Default pattern for file naming
 // - Default max duration and filesize limits
-// - Initial resolution and framerate (will be overridden if max quality is enabled)
+// - Initial resolution and framerate (will be overridden by quality selector)
 //
 // Requirements: 16.1, 16.2, 16.8, 16.10
 func (gam *GitHubActionsMode) CreateChannelConfigWithQuality(username, site string) (*entity.ChannelConfig, error) {
@@ -532,15 +535,15 @@ func (gam *GitHubActionsMode) CreateChannelConfigWithQuality(username, site stri
 		IsPaused:    false,
 		Username:    username,
 		Site:        site,
-		Framerate:   30,  // Default framerate (will be overridden if max quality is enabled)
-		Resolution:  1080, // Default resolution (will be overridden if max quality is enabled)
+		Framerate:   30,  // Default framerate (will be overridden by quality selector)
+		Resolution:  1080, // Default resolution (will be overridden by quality selector)
 		Pattern:     "videos/{{if ne .Site \"chaturbate\"}}{{.Site}}/{{end}}{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}",
 		MaxDuration: 0, // No duration limit by default
 		MaxFilesize: 0, // No filesize limit by default
 	}
 	
-	// Apply maximum quality settings if enabled
-	// This will override the default resolution and framerate
+	// Apply maximum quality settings (ALWAYS enabled by default)
+	// This will override the default resolution and framerate with the highest available
 	if err := gam.ApplyQualityToChannelConfig(config); err != nil {
 		return nil, fmt.Errorf("failed to apply quality settings: %w", err)
 	}
@@ -570,6 +573,72 @@ func (gam *GitHubActionsMode) GetAssignedChannel() (string, error) {
 	}
 	
 	return gam.Channels[jobIndex], nil
+}
+
+// ParseChannelString parses a channel string in the format "site:username" or just "username".
+// If no site prefix is provided, defaults to "chaturbate".
+//
+// Supported formats:
+//   - "chaturbate:username" -> site="chaturbate", username="username"
+//   - "stripchat:username" -> site="stripchat", username="username"
+//   - "username" -> site="chaturbate", username="username" (default)
+//
+// Returns:
+//   - site: The site name (chaturbate, stripchat, etc.)
+//   - username: The channel username
+//   - error: Error if the format is invalid
+func ParseChannelString(channelStr string) (site string, username string, err error) {
+	channelStr = strings.TrimSpace(channelStr)
+	if channelStr == "" {
+		return "", "", fmt.Errorf("channel string is empty")
+	}
+	
+	// Check if the channel string contains a site prefix (site:username)
+	parts := strings.SplitN(channelStr, ":", 2)
+	
+	if len(parts) == 2 {
+		// Format: site:username
+		site = strings.TrimSpace(strings.ToLower(parts[0]))
+		username = strings.TrimSpace(parts[1])
+		
+		// Validate site
+		validSites := map[string]bool{
+			"chaturbate": true,
+			"stripchat":  true,
+		}
+		
+		if !validSites[site] {
+			return "", "", fmt.Errorf("unsupported site: %s (supported: chaturbate, stripchat)", site)
+		}
+		
+		if username == "" {
+			return "", "", fmt.Errorf("username is empty for site: %s", site)
+		}
+		
+		return site, username, nil
+	}
+	
+	// Format: username (no site prefix, default to chaturbate)
+	username = channelStr
+	site = "chaturbate"
+	
+	return site, username, nil
+}
+
+// GetAssignedChannelWithSite returns the channel and site assigned to this matrix job.
+// It parses the channel string to extract the site and username.
+//
+// Returns:
+//   - site: The site name (chaturbate, stripchat, etc.)
+//   - username: The channel username
+//   - error: Error if parsing fails
+func (gam *GitHubActionsMode) GetAssignedChannelWithSite() (site string, username string, err error) {
+	channelStr, err := gam.GetAssignedChannel()
+	if err != nil {
+		return "", "", err
+	}
+	
+	return ParseChannelString(channelStr)
 }
 
 // GetActiveRecordingsCount returns the count of currently active recordings.
@@ -671,11 +740,20 @@ func (gam *GitHubActionsMode) StartWorkflowLifecycle(configDir, recordingsDir st
 		return fmt.Errorf("failed to get assigned channel: %w", err)
 	}
 	
+	// Parse the channel to get site and username
+	site, username, err := ParseChannelString(assignedChannel)
+	if err != nil {
+		return fmt.Errorf("failed to parse channel string '%s': %w", assignedChannel, err)
+	}
+	
+	log.Printf("Matrix job %s assigned to channel: %s (site: %s, username: %s)", 
+		gam.MatrixJobID, assignedChannel, site, username)
+	
 	err = gam.MatrixCoordinator.RegisterJob(gam.MatrixJobID, assignedChannel)
 	if err != nil {
 		return fmt.Errorf("failed to register matrix job: %w", err)
 	}
-	log.Printf("Matrix job %s registered successfully for channel: %s", gam.MatrixJobID, assignedChannel)
+	log.Printf("Matrix job %s registered successfully", gam.MatrixJobID)
 	
 	// Step 3: Start Chain Manager runtime monitoring in background goroutine
 	log.Println("Starting Chain Manager runtime monitoring in background...")

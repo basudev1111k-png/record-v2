@@ -9,7 +9,7 @@ on:
         type: string
         default: ''
       channels:
-        description: 'Comma-separated list of channels to record (or leave empty to use channels.txt)'
+        description: 'Comma-separated list of channels to record (or leave empty to use .github/workflows/channels.txt)'
         required: false
         type: string
         default: ''
@@ -56,18 +56,18 @@ jobs:
             echo "Cost-saving mode ENABLED: 10-minute polling, max 2 concurrent channels"
           fi
           
-          # Validate channels input or read from channels.txt
+          # Validate channels input or read from .github/workflows/channels.txt
           CHANNELS_LIST="${{ inputs.channels }}"
           if [ -z "$CHANNELS_LIST" ]; then
-            if [ -f "channels.txt" ]; then
-              echo "Reading channels from channels.txt..."
+            if [ -f ".github/workflows/channels.txt" ]; then
+              echo "Reading channels from .github/workflows/channels.txt..."
               # Read non-empty lines that don't start with # and join with commas
-              CHANNELS_LIST=$(grep -v '^[[:space:]]*#' channels.txt | grep -v '^[[:space:]]*$' | tr -d '\r' | paste -sd "," -)
+              CHANNELS_LIST=$(grep -v '^[[:space:]]*#' .github/workflows/channels.txt | grep -v '^[[:space:]]*$' | tr -d '\r' | paste -sd "," -)
             fi
           fi
           
           if [ -z "$CHANNELS_LIST" ]; then
-            echo "Error: No channels provided via input or channels.txt"
+            echo "Error: No channels provided via input or .github/workflows/channels.txt"
             exit 1
           fi
           

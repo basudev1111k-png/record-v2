@@ -24,9 +24,65 @@ Example dashboard and settings views from the current web UI.
 
 ![Settings](docs/screenshots/settings.png)
 
+# 📚 Documentation
+
+- **[QUICKSTART.md](QUICKSTART.md)** - Get started in 3 steps
+- **[CHANNELS.md](CHANNELS.md)** - Complete channel configuration guide
+- **[docs/SIMPLE_SETUP.md](docs/SIMPLE_SETUP.md)** - Detailed setup with examples
+- **[FILE_STRUCTURE.md](FILE_STRUCTURE.md)** - Understanding file locations
+- **[README_DEV.md](README_DEV.md)** - Development guide
+
 # Getting Started
 
 Go to the [📦 Releases page](https://github.com/HeapOfChaos/goondvr/releases) and download the appropriate binary. (e.g., `windows_amd64_goondvr.exe`)
+
+## 📝 Quick Setup: Add Channels via JSON (Recommended)
+
+The simplest way to add multiple channels is by creating a `channels.json` file:
+
+### Automated Setup
+
+**Windows (PowerShell):**
+```powershell
+.\setup-channels.ps1
+```
+
+**macOS / Linux:**
+```bash
+chmod +x setup-channels.sh && ./setup-channels.sh
+```
+
+### Manual Setup
+
+1. **Create the config directory:**
+   ```bash
+   mkdir -p conf
+   ```
+
+2. **Copy the example file:**
+   ```bash
+   cp channels.json.example conf/channels.json
+   ```
+
+3. **Edit `conf/channels.json`** with your channels:
+   ```json
+   [
+     {
+       "username": "your_favorite_streamer",
+       "site": "chaturbate",
+       "is_paused": false,
+       "framerate": 30,
+       "resolution": 1080,
+       "max_duration": 0,
+       "max_filesize": 0
+     }
+   ]
+   ```
+
+4. **Start the application** - it will automatically load all channels!
+
+📖 **See [QUICKSTART.md](QUICKSTART.md) for step-by-step instructions**  
+📖 **See [CHANNELS.md](CHANNELS.md) for complete documentation, examples, and advanced configuration**
 
 ## 🌐 Launching the Web UI
 
