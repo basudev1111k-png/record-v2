@@ -308,9 +308,21 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 		headers["User-Agent"] = server.Config.UserAgent
 	}
 	
-	// Add cookies
+	// Add cookies - ensure they're properly formatted
 	if server.Config.Cookies != "" {
-		headers["Cookie"] = server.Config.Cookies
+		// CycleTLS expects cookies in the Cookie header as a semicolon-separated string
+		// Make sure there are no extra spaces or formatting issues
+		cookieStr := strings.TrimSpace(server.Config.Cookies)
+		headers["Cookie"] = cookieStr
+		
+		if server.Config.Debug {
+			// Log cookie preview for debugging
+			preview := cookieStr
+			if len(preview) > 100 {
+				preview = preview[:100] + "..."
+			}
+			fmt.Printf("[DEBUG] CycleTLS cookies: %s\n", preview)
+		}
 	}
 	
 	// Make request with CycleTLS using Chrome 120 profile

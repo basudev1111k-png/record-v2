@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/HeapOfChaos/goondvr/server"
@@ -33,12 +34,30 @@ func RefreshCookiesWithFlareSolverr(ctx context.Context) error {
 	// Prepare headers - use a standard Chrome User-Agent
 	// FlareSolverr will use its own User-Agent from the real Chrome browser
 	headers := make(map[string]string)
+	headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+	headers["Accept-Language"] = "en-US,en;q=0.5"
 
-	// Make request through FlareSolverr (it will solve Cloudflare challenge)
-	log.Printf("   Visiting %s through FlareSolverr...", chaturbateURL)
+	// Step 1: Visit homepage to get initial cookies and solve Cloudflare
+	log.Printf("   Step 1: Visiting %s through FlareSolverr...", chaturbateURL)
 	_, cookies, userAgent, err := flare.GetWithCookiesAndUA(ctx, chaturbateURL, nil, headers)
 	if err != nil {
-		return fmt.Errorf("flaresolverr request failed: %w", err)
+		return fmt.Errorf("flaresolverr homepage request failed: %w", err)
+	}
+
+	// Step 2: Visit age verification endpoint to accept age gate
+	// Chaturbate uses /auth/age_verify/ endpoint to set age verification cookie
+	ageVerifyURL := chaturbateURL + "/auth/age_verify/"
+	log.Printf("   Step 2: Accepting age verification at %s...", ageVerifyURL)
+	_, cookies2, _, err := flare.GetWithCookiesAndUA(ctx, ageVerifyURL, cookies, headers)
+	if err != nil {
+		// Age verify might fail, but we can continue with cookies from step 1
+		log.Printf("   Warning: Age verification request failed (continuing): %v", err)
+	} else {
+		// Merge cookies from both requests
+		for name, value := range cookies2 {
+			cookies[name] = value
+		}
+		log.Println("   ✅ Age verification accepted")
 	}
 
 	// Extract cf_clearance cookie
@@ -56,21 +75,43 @@ func RefreshCookiesWithFlareSolverr(ctx context.Context) error {
 
 	// Build complete cookie string with ALL cookies from FlareSolverr
 	// Chaturbate needs more than just cf_clearance to access HLS sources
+	// IMPORTANT: Preserve cookie order and ensure proper formatting
 	var cookiePairs []string
-	for name, value := range cookies {
-		cookiePairs = append(cookiePairs, fmt.Sprintf("%s=%s", name, value))
+	
+	// Add cf_clearance first (most important)
+	cookiePairs = append(cookiePairs, fmt.Sprintf("cf_clearance=%s", cfClearance))
+	
+	// Add all other cookies from FlareSolverr in a consistent order
+	// Sort cookie names for consistency
+	var cookieNames []string
+	for name := range cookies {
+		if name != "cf_clearance" {
+			cookieNames = append(cookieNames, name)
+		}
+	}
+	sort.Strings(cookieNames)
+	
+	// Add cookies in sorted order
+	for _, name := range cookieNames {
+		cookiePairs = append(cookiePairs, fmt.Sprintf("%s=%s", name, cookies[name]))
 	}
 	
 	// CRITICAL: Update BOTH cookies AND User-Agent
 	// Cloudflare ties the cookies to the User-Agent that was used to get them
-	server.Config.Cookies = strings.Join(cookiePairs, "; ")
+	cookieString := strings.Join(cookiePairs, "; ")
+	server.Config.Cookies = cookieString
 	server.Config.UserAgent = userAgent
 	
+	if server.Config.Debug {
+		log.Printf("   Final cookie string length: %d characters", len(cookieString))
+		log.Printf("   Cookie preview: %s...", cookieString[:min(200, len(cookieString))])
+	}
+	
 	log.Println("✅ Successfully refreshed Cloudflare cookies!")
-	log.Printf("   New cf_clearance: %s...", cfClearance[:50])
+	log.Printf("   New cf_clearance: %s...", cfClearance[:min(50, len(cfClearance))])
 	log.Printf("   Total cookies received: %d", len(cookies))
 	log.Printf("   Cookie names: %v", getCookieNames(cookies))
-	log.Printf("   User-Agent: %s...", userAgent[:80])
+	log.Printf("   User-Agent: %s...", userAgent[:min(80, len(userAgent))])
 	log.Println("   These cookies are valid for this GitHub Actions runner's IP")
 
 	return nil
@@ -168,4 +209,12 @@ func getCookieNames(cookies map[string]string) []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
