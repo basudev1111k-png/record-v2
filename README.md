@@ -185,7 +185,7 @@ Available options:
 --stripchat-pdkey value     Manually specify Stripchat pdkey if keys have rotated
 --domain value              Chaturbate domain to use (default: "https://chaturbate.com/")
 --completed-dir value       Directory to move fully closed recordings into (default: <recording dir>/completed)
---finalize-mode value       Post-process closed recordings: none, remux, or transcode (default: "none")
+--finalize-mode value       Post-process closed recordings: none, remux, or transcode (default: "remux")
 --ffmpeg-encoder value      FFmpeg video encoder for transcode mode (default: "libx264")
 --ffmpeg-container value    FFmpeg output container for remux/transcode mode: mp4 or mkv (default: "mp4")
 --ffmpeg-quality value      FFmpeg quality value; CRF for software encoders, CQ/global quality for many hardware encoders (default: 23)

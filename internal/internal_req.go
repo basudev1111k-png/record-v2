@@ -67,26 +67,12 @@ func CreateTransport() *http.Transport {
 
 // Get sends an HTTP GET request and returns the response as a string.
 func (h *Req) Get(ctx context.Context, url string) (string, error) {
-	// Check if FlareSolverr is enabled (for GitHub Actions)
-	if IsFlareSolverrEnabled() {
-		flare := NewFlareSolverrClient()
-		
-		// Parse cookies from server config
-		cookies := ParseCookies(server.Config.Cookies)
-		
-		// Prepare headers
-		headers := make(map[string]string)
-		if server.Config.UserAgent != "" {
-			headers["User-Agent"] = server.Config.UserAgent
-		}
-		if !h.isMedia {
-			headers["X-Requested-With"] = "XMLHttpRequest"
-		}
-		
-		return flare.Get(ctx, url, cookies, headers)
-	}
+	// FlareSolverr is NOT used for API endpoints
+	// It's only useful for HTML pages with Cloudflare challenges
+	// API endpoints like /api/chatvideocontext/ don't have Cloudflare challenges
+	// They just check cookies and IP reputation
 	
-	// Original implementation
+	// Original implementation (works fine with valid cookies)
 	resp, err := h.GetBytes(ctx, url)
 	if err != nil {
 		return "", fmt.Errorf("get bytes: %w", err)

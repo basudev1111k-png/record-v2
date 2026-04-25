@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/HeapOfChaos/goondvr/config"
 	"github.com/HeapOfChaos/goondvr/entity"
 	"github.com/HeapOfChaos/goondvr/github_actions"
+	"github.com/HeapOfChaos/goondvr/internal"
 	"github.com/HeapOfChaos/goondvr/manager"
 	"github.com/HeapOfChaos/goondvr/router"
 	"github.com/HeapOfChaos/goondvr/server"
@@ -110,7 +113,7 @@ func main() {
 			&cli.StringFlag{
 				Name:  "finalize-mode",
 				Usage: "Post-process closed recordings: none, remux, or transcode",
-				Value: "none",
+				Value: "remux",
 			},
 			&cli.StringFlag{
 				Name:  "ffmpeg-encoder",
@@ -176,6 +179,17 @@ func startGitHubActionsMode(c *cli.Context) error {
 	// Load settings (needed by Manager)
 	if err := manager.LoadSettings(); err != nil {
 		return fmt.Errorf("failed to load settings: %w", err)
+	}
+	
+	// Refresh cookies using FlareSolverr if in GitHub Actions
+	// This gets fresh cookies valid for the GitHub Actions runner's IP
+	if internal.ShouldRefreshCookies() {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		if err := internal.RefreshCookiesWithFlareSolverr(ctx); err != nil {
+			log.Printf("⚠️  Warning: Failed to refresh cookies with FlareSolverr: %v", err)
+			log.Println("   Continuing with existing cookies from settings.json")
+		}
 	}
 	
 	// Initialize Manager (needed to start recordings)

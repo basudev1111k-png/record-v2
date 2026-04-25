@@ -50,12 +50,12 @@ func NormalizeSite(site string) string {
 // NormalizeFinalizeMode returns a supported finalization mode.
 func NormalizeFinalizeMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "remux":
-		return "remux"
+	case "none":
+		return "none"
 	case "transcode":
 		return "transcode"
 	default:
-		return "none"
+		return "remux"
 	}
 }
 
