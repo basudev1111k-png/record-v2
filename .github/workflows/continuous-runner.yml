@@ -97,7 +97,7 @@ jobs:
         with:
           path: |
             ./conf
-          key: shared-config-latest
+          key: shared-config-${{ github.run_id }}-${{ matrix.job_id }}
           restore-keys: |
             shared-config-
       
@@ -112,8 +112,9 @@ jobs:
             ./videos
             ./state
             ./partial
-          key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job_id }}
+          key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job_id }}-${{ github.run_id }}
           restore-keys: |
+            state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job_id }}-
             state-latest-job-${{ matrix.job_id }}
       
       - name: Setup Go
@@ -206,7 +207,7 @@ jobs:
         with:
           path: |
             ./conf
-          key: shared-config-latest
+          key: shared-config-${{ github.run_id }}-${{ matrix.job_id }}
       
       - name: Save job-specific state cache
         if: always()
@@ -219,7 +220,7 @@ jobs:
             ./videos
             ./state
             ./partial
-          key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job_id }}
+          key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job_id }}-${{ github.run_id }}
       
       - name: Upload artifacts on failure
         if: failure()
