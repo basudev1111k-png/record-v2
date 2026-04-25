@@ -163,18 +163,12 @@ jobs:
           echo "Matrix Job ID: $MATRIX_JOB_ID"
           echo "Channels: $CHANNELS"
           
-          # TODO: Implement GitHub Actions mode in main.go
-          # This will be implemented in subsequent tasks
-          # go run main.go \
-          #   --mode github-actions \
-          #   --matrix-job-id $MATRIX_JOB_ID \
-          #   --session-id $SESSION_ID \
-          #   --channels "$CHANNELS" \
-          #   --max-quality \
-          #   --cost-saving=$COST_SAVING
-          
-          echo "Recording mode not yet implemented - placeholder for Task 1"
-          echo "Workflow infrastructure is ready for implementation"
+          # Start recording with GitHub Actions mode
+          go run main.go \
+            --mode github-actions \
+            --matrix-job-id $MATRIX_JOB_ID \
+            --session-id $SESSION_ID \
+            --channels "$CHANNELS"
       
       - name: Save shared configuration cache
         if: always()
