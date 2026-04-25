@@ -64,7 +64,13 @@ func (ch *Channel) Monitor(runID uint64) {
 		}
 		// isExpectedOffline returns true for errors where the full interval delay is appropriate.
 		// Transient errors (502, decode errors, network hiccups) should retry quickly.
+		// Cloudflare blocks should also retry quickly when cookies are configured.
 		isExpectedOffline := func(err error) bool {
+			// If Cloudflare blocked but we have cookies configured, treat as transient (retry quickly)
+			if errors.Is(err, internal.ErrCloudflareBlocked) && server.Config.Cookies != "" {
+				return false // Retry in 10 seconds instead of waiting full interval
+			}
+			
 			return errors.Is(err, internal.ErrChannelOffline) ||
 				errors.Is(err, internal.ErrPrivateStream) ||
 				errors.Is(err, internal.ErrHiddenStream) ||
@@ -102,7 +108,13 @@ func (ch *Channel) Monitor(runID uint64) {
 					)
 				}
 				server.Manager.ReportCFBlock(ch.Config.Username)
-				ch.Info("channel was blocked by Cloudflare; try with `-cookies` and `-user-agent`? try again in %d min(s)", server.Config.Interval)
+				
+				// If cookies are configured, retry quickly (10s). Otherwise wait full interval.
+				if server.Config.Cookies != "" {
+					ch.Info("channel was blocked by Cloudflare (cookies configured); retrying in 10s")
+				} else {
+					ch.Info("channel was blocked by Cloudflare; try with `-cookies` and `-user-agent`? try again in %d min(s)", server.Config.Interval)
+				}
 			} else if errors.Is(err, internal.ErrAgeVerification) {
 				ch.Info("age verification required; pass cookies with `-cookies` to authenticate, try again in %d min(s)", server.Config.Interval)
 			} else if errors.Is(err, internal.ErrRoomPasswordRequired) {
