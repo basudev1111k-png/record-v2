@@ -30,15 +30,13 @@ func RefreshCookiesWithFlareSolverr(ctx context.Context) error {
 	// Visit Chaturbate homepage to get fresh cf_clearance cookie
 	chaturbateURL := strings.TrimSuffix(server.Config.Domain, "/")
 	
-	// Prepare headers
+	// Prepare headers - use a standard Chrome User-Agent
+	// FlareSolverr will use its own User-Agent from the real Chrome browser
 	headers := make(map[string]string)
-	if server.Config.UserAgent != "" {
-		headers["User-Agent"] = server.Config.UserAgent
-	}
 
 	// Make request through FlareSolverr (it will solve Cloudflare challenge)
 	log.Printf("   Visiting %s through FlareSolverr...", chaturbateURL)
-	_, cookies, err := flare.GetWithCookies(ctx, chaturbateURL, nil, headers)
+	_, cookies, userAgent, err := flare.GetWithCookiesAndUA(ctx, chaturbateURL, nil, headers)
 	if err != nil {
 		return fmt.Errorf("flaresolverr request failed: %w", err)
 	}
@@ -56,18 +54,28 @@ func RefreshCookiesWithFlareSolverr(ctx context.Context) error {
 		return fmt.Errorf("no cf_clearance cookie received from FlareSolverr")
 	}
 
-	// Update server config with fresh cookie
+	// CRITICAL: Update BOTH cookie AND User-Agent
+	// Cloudflare ties the cookie to the User-Agent that was used to get it
 	server.Config.Cookies = fmt.Sprintf("cf_clearance=%s", cfClearance)
+	server.Config.UserAgent = userAgent
 	
 	log.Println("✅ Successfully refreshed Cloudflare cookies!")
 	log.Printf("   New cf_clearance: %s...", cfClearance[:50])
-	log.Println("   These cookies are valid for this GitHub Actions runner's IP")
+	log.Printf("   User-Agent: %s...", userAgent[:80])
+	log.Println("   ⚠️  IMPORTANT: Cookie and User-Agent must match (Cloudflare requirement)")
+	log.Println("   These credentials are valid for this GitHub Actions runner's IP")
 
 	return nil
 }
 
 // GetWithCookies makes a request and returns both response and cookies
 func (f *FlareSolverrClient) GetWithCookies(ctx context.Context, url string, cookies map[string]string, headers map[string]string) (string, map[string]string, error) {
+	response, cookiesMap, _, err := f.GetWithCookiesAndUA(ctx, url, cookies, headers)
+	return response, cookiesMap, err
+}
+
+// GetWithCookiesAndUA makes a request and returns response, cookies, and User-Agent
+func (f *FlareSolverrClient) GetWithCookiesAndUA(ctx context.Context, url string, cookies map[string]string, headers map[string]string) (string, map[string]string, string, error) {
 	// Convert cookies to FlareSolverr format
 	var flareCookies []FlareCookie
 	for name, value := range cookies {
@@ -87,33 +95,33 @@ func (f *FlareSolverrClient) GetWithCookies(ctx context.Context, url string, coo
 
 	jsonData, err := json.Marshal(reqData)
 	if err != nil {
-		return "", nil, fmt.Errorf("marshal request: %w", err)
+		return "", nil, "", fmt.Errorf("marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", f.baseURL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return "", nil, fmt.Errorf("create request: %w", err)
+		return "", nil, "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return "", nil, fmt.Errorf("do request: %w", err)
+		return "", nil, "", fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", nil, fmt.Errorf("read response: %w", err)
+		return "", nil, "", fmt.Errorf("read response: %w", err)
 	}
 
 	var flareResp FlareSolverrResponse
 	if err := json.Unmarshal(body, &flareResp); err != nil {
-		return "", nil, fmt.Errorf("unmarshal response: %w", err)
+		return "", nil, "", fmt.Errorf("unmarshal response: %w", err)
 	}
 
 	if flareResp.Status != "ok" {
-		return "", nil, fmt.Errorf("flaresolverr error: %s", flareResp.Message)
+		return "", nil, "", fmt.Errorf("flaresolverr error: %s", flareResp.Message)
 	}
 
 	// Extract cookies from response
@@ -122,7 +130,10 @@ func (f *FlareSolverrClient) GetWithCookies(ctx context.Context, url string, coo
 		resultCookies[cookie.Name] = cookie.Value
 	}
 
-	return flareResp.Solution.Response, resultCookies, nil
+	// Extract User-Agent from response
+	userAgent := flareResp.Solution.UserAgent
+
+	return flareResp.Solution.Response, resultCookies, userAgent, nil
 }
 
 // ShouldRefreshCookies checks if cookies need to be refreshed
