@@ -166,21 +166,40 @@ func startGitHubActionsMode(c *cli.Context) error {
 	fmt.Println(logo)
 	fmt.Println("\n🚀 Starting GitHub Actions Continuous Runner Mode\n")
 	
+	// Initialize server config (needed by Manager)
+	var err error
+	server.Config, err = config.New(c)
+	if err != nil {
+		return fmt.Errorf("failed to create config: %w", err)
+	}
+	
+	// Load settings (needed by Manager)
+	if err := manager.LoadSettings(); err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+	
+	// Initialize Manager (needed to start recordings)
+	server.Manager, err = manager.New()
+	if err != nil {
+		return fmt.Errorf("failed to create manager: %w", err)
+	}
+	
 	// Parse and validate GitHub Actions mode configuration
 	gam, err := github_actions.ParseGitHubActionsModeConfig(c)
 	if err != nil {
 		return fmt.Errorf("failed to parse GitHub Actions mode config: %w", err)
 	}
 	
-	// Start the workflow lifecycle
+	// Start the workflow lifecycle (this will create channel config and start recording)
 	configDir := "./conf"
 	recordingsDir := "./videos"
 	
-	if err := gam.StartWorkflowLifecycle(configDir, recordingsDir); err != nil {
+	if err := gam.StartWorkflowLifecycle(configDir, recordingsDir, server.Manager); err != nil {
 		return fmt.Errorf("failed to start workflow lifecycle: %w", err)
 	}
 	
 	// Keep the process running
+	fmt.Println("\n✅ GitHub Actions mode started successfully - process will run until graceful shutdown")
 	select {}
 }
 

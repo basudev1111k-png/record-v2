@@ -33,6 +33,7 @@ type GitHubActionsMode struct {
 	GracefulShutdown      *GracefulShutdown
 	StreamFailureRecovery *StreamFailureRecovery
 	AdaptivePolling       *AdaptivePolling
+	Manager               interface{} // Manager interface for starting recordings (will be set externally)
 	
 	// Runtime state
 	ctx          context.Context
@@ -719,8 +720,13 @@ func (gam *GitHubActionsMode) IsCostSavingMode() bool {
 // This method should be called after initializing GitHubActionsMode to start the workflow.
 // It returns an error if any critical initialization step fails.
 //
+// Parameters:
+//   - configDir: Directory for configuration files
+//   - recordingsDir: Directory for recordings
+//   - manager: Manager instance for starting recordings (must implement CreateChannel method)
+//
 // Requirements: 2.1, 4.1, 7.1, 13.4, 17.9
-func (gam *GitHubActionsMode) StartWorkflowLifecycle(configDir, recordingsDir string) error {
+func (gam *GitHubActionsMode) StartWorkflowLifecycle(configDir, recordingsDir string, manager interface{}) error {
 	log.Println("Starting workflow lifecycle management...")
 	
 	// Step 1: Restore state from cache on startup
@@ -773,13 +779,31 @@ func (gam *GitHubActionsMode) StartWorkflowLifecycle(configDir, recordingsDir st
 	}
 	log.Printf("Matrix job %s registered successfully", gam.MatrixJobID)
 	
-	// Step 4: Start recording for the assigned channel
-	// Note: We need access to the Manager instance to start recording
-	// For now, we'll log that recording should start here
-	// TODO: Integrate with Manager to actually start recording
-	log.Printf("⚠️  TODO: Start recording for channel %s (site: %s)", username, site)
-	log.Printf("⚠️  This requires integration with the Manager component")
-	log.Printf("⚠️  Channel config ready: %+v", channelConfig)
+	// Step 4: Start recording for the assigned channel using the Manager
+	log.Printf("Starting recording for channel %s (site: %s)...", username, site)
+	
+	// Store the manager reference
+	gam.Manager = manager
+	
+	// Type assert to get the CreateChannel method
+	type ChannelCreator interface {
+		CreateChannel(conf *entity.ChannelConfig, shouldSave bool) error
+	}
+	
+	if mgr, ok := manager.(ChannelCreator); ok {
+		// Start recording - don't save to config file (shouldSave = false)
+		// because GitHub Actions mode manages channels dynamically
+		if err := mgr.CreateChannel(channelConfig, false); err != nil {
+			return fmt.Errorf("failed to start recording for channel %s: %w", username, err)
+		}
+		log.Printf("✅ Successfully started recording for channel %s", username)
+		log.Printf("   - Site: %s", channelConfig.Site)
+		log.Printf("   - Resolution: %dp", channelConfig.Resolution)
+		log.Printf("   - Framerate: %dfps", channelConfig.Framerate)
+		log.Printf("   - Pattern: %s", channelConfig.Pattern)
+	} else {
+		return fmt.Errorf("manager does not implement CreateChannel method")
+	}
 	
 	// Step 5: Start Chain Manager runtime monitoring in background goroutine
 	log.Println("Starting Chain Manager runtime monitoring in background...")
