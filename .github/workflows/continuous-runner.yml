@@ -122,10 +122,9 @@ jobs:
             ./videos
             ./state
             ./partial
-          key: state-run-${{ github.run_id }}-job-${{ matrix.job.id }}-never-match
+          key: state-pending-upload-${{ github.run_id }}-job-${{ matrix.job.id }}-never-match
           restore-keys: |
-            state-run-
-            state-latest-job-${{ matrix.job.id }}
+            state-pending-upload-
       
       - name: Upload cached recordings from previous run
         if: always()
@@ -136,13 +135,32 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           echo "📦 Checking for cached recordings from previous run..."
-          echo "Cache was restored: ${{ steps.restore_job_state.outputs.cache-hit }}"
-          echo "Cache key used: ${{ steps.restore_job_state.outputs.cache-matched-key }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Cache Restore Debug Info:"
+          echo "  Cache hit: ${{ steps.restore_job_state.outputs.cache-hit }}"
+          echo "  Cache matched key: ${{ steps.restore_job_state.outputs.cache-matched-key }}"
+          echo "  Current run ID: ${{ github.run_id }}"
+          echo "  Matrix job ID: ${{ matrix.job.id }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          
+          # Check videos directory
+          echo "📁 Checking ./videos directory..."
+          if [ -d "./videos" ]; then
+            echo "  Directory exists"
+            echo "  Total size: $(du -sh ./videos 2>/dev/null | cut -f1)"
+            echo "  File count: $(find ./videos -type f 2>/dev/null | wc -l)"
+            echo ""
+            echo "  Contents:"
+            ls -lah ./videos/ 2>/dev/null || echo "  (empty or no files)"
+          else
+            echo "  Directory does not exist"
+          fi
           echo ""
           
           # Check if there are any recordings in cache
           if [ -d "./videos" ] && [ "$(ls -A ./videos/*.{ts,mp4,mkv} 2>/dev/null)" ]; then
-            echo "📁 Found cached recordings:"
+            echo "✅ Found cached recordings to upload:"
             ls -lh ./videos/
             echo ""
             
@@ -468,18 +486,36 @@ jobs:
         if: always()
         run: |
           echo "🛡️ Emergency cleanup - preparing recordings for cache..."
-          echo "Recordings will be uploaded when the next workflow starts"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Current run ID: ${{ github.run_id }}"
+          echo "Matrix job ID: ${{ matrix.job.id }}"
+          echo "Cache key will be: state-pending-upload-${{ github.run_id }}-job-${{ matrix.job.id }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo ""
           
           # Check if there are any recordings
-          if [ -d "./videos" ] && [ "$(ls -A ./videos 2>/dev/null)" ]; then
-            echo "📁 Found recordings in ./videos directory:"
-            ls -lh ./videos/
+          if [ -d "./videos" ]; then
+            echo "📁 Videos directory contents:"
+            ls -lah ./videos/ 2>/dev/null || echo "  (empty)"
             echo ""
-            echo "✅ These recordings will be saved to cache"
-            echo "✅ Next workflow run will upload them automatically"
+            
+            VIDEO_COUNT=$(find ./videos -type f \( -name "*.ts" -o -name "*.mp4" -o -name "*.mkv" \) 2>/dev/null | wc -l)
+            TOTAL_SIZE=$(du -sh ./videos 2>/dev/null | cut -f1)
+            
+            if [ "$VIDEO_COUNT" -gt 0 ]; then
+              echo "✅ Found $VIDEO_COUNT recording(s) (Total size: $TOTAL_SIZE)"
+              echo "✅ These recordings will be saved to cache with key:"
+              echo "   state-pending-upload-${{ github.run_id }}-job-${{ matrix.job.id }}"
+              echo ""
+              echo "📋 Files to be cached:"
+              find ./videos -type f \( -name "*.ts" -o -name "*.mp4" -o -name "*.mkv" \) -exec ls -lh {} \;
+              echo ""
+              echo "✅ Next workflow run will upload them automatically"
+            else
+              echo "ℹ️  No video recordings found"
+            fi
           else
-            echo "ℹ️  No recordings found in ./videos directory"
+            echo "ℹ️  Videos directory does not exist"
           fi
           
           echo ""
@@ -507,7 +543,7 @@ jobs:
             ./videos
             ./state
             ./partial
-          key: state-run-${{ github.run_id }}-job-${{ matrix.job.id }}
+          key: state-pending-upload-${{ github.run_id }}-job-${{ matrix.job.id }}
       
       - name: Upload recordings as artifacts (always runs, even on cancellation)
         if: always()
