@@ -173,7 +173,12 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, error) {
 	flare := internal.NewFlareSolverrClient()
 
-	roomURL := fmt.Sprintf("%s%s/", server.Config.Domain, username)
+	// Clean username to prevent trailing spaces/newlines from corrupting the URL
+	cleanUsername := strings.TrimSpace(username)
+
+	// Ensure domain has exactly one trailing slash
+	domain := strings.TrimRight(server.Config.Domain, "/")
+	roomURL := fmt.Sprintf("%s/%s/", domain, cleanUsername)
 
 	// Build cookies from server config
 	cookies := internal.ParseCookies(server.Config.Cookies)
@@ -186,23 +191,23 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 	}
 
 	// Fetch room page through FlareSolverr's real Chrome browser
-	fmt.Printf("[DEBUG] %s: Fetching room page via FlareSolverr: %s\n", username, roomURL)
+	fmt.Printf("[DEBUG] %s: Fetching room page via FlareSolverr: %s\n", cleanUsername, roomURL)
 	htmlBody, _, _, err := flare.GetWithCookiesAndUA(ctx, roomURL, cookies, headers)
 	if err != nil {
 		return nil, fmt.Errorf("flaresolverr room fetch failed: %w", err)
 	}
 
-	fmt.Printf("[DEBUG] %s: Room page received (length: %d)\n", username, len(htmlBody))
+	fmt.Printf("[DEBUG] %s: Room page received (length: %d)\n", cleanUsername, len(htmlBody))
 
 	// Check for Chaturbate's 404 page (cancelled/deleted broadcaster)
 	if strings.Contains(htmlBody, "HTTP 404") || strings.Contains(htmlBody, "cancelled broadcaster") || strings.Contains(htmlBody, "Page Not Found") {
-		fmt.Printf("[INFO] %s: Room page returned 404 (broadcaster may be cancelled or deleted)\n", username)
+		fmt.Printf("[INFO] %s: Room page returned 404 (broadcaster may be cancelled or deleted)\n", cleanUsername)
 		return &Stream{}, internal.ErrChannelOffline
 	}
 
 	// Parse initialRoomDossier from HTML
 	// Format: window.initialRoomDossier = "...escaped JSON..."
-	stream, err := parseInitialRoomDossier(htmlBody, username)
+	stream, err := parseInitialRoomDossier(htmlBody, cleanUsername)
 	if err != nil {
 		// If we can't find initialRoomDossier, the channel is likely offline
 		// or the page structure has changed
