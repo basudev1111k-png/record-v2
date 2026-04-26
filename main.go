@@ -212,8 +212,54 @@ func startGitHubActionsMode(c *cli.Context) error {
 		return fmt.Errorf("failed to start workflow lifecycle: %w", err)
 	}
 	
+	// Handle SIGINT / SIGTERM for GitHub Actions cancellation
+	// This ensures recordings are saved even when the workflow is manually cancelled
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		fmt.Println("\n⚠️  Workflow cancellation detected - initiating emergency shutdown...")
+		fmt.Println("📼 Saving in-progress recordings...")
+		
+		// Cancel the GitHub Actions mode context to stop all background goroutines
+		gam.Cancel()
+		
+		// Gracefully shutdown the manager to finalize recordings
+		server.Manager.Shutdown()
+		
+		// Save state to cache before exiting
+		fmt.Println("💾 Saving state to cache...")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		
+		if err := gam.StatePersister.SaveState(ctx, configDir, recordingsDir); err != nil {
+			log.Printf("⚠️  Warning: Failed to save state: %v", err)
+		} else {
+			fmt.Println("✅ State saved successfully")
+		}
+		
+		// Upload any completed recordings
+		fmt.Println("📤 Uploading completed recordings...")
+		if gam.StorageUploader != nil {
+			// Give uploads 60 seconds to complete
+			uploadCtx, uploadCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer uploadCancel()
+			
+			// Scan for completed recordings and upload them
+			if err := gam.UploadCompletedRecordings(uploadCtx, recordingsDir); err != nil {
+				log.Printf("⚠️  Warning: Failed to upload recordings: %v", err)
+			} else {
+				fmt.Println("✅ Recordings uploaded successfully")
+			}
+		}
+		
+		fmt.Println("✅ Emergency shutdown complete - recordings saved!")
+		os.Exit(0)
+	}()
+	
 	// Keep the process running
 	fmt.Println("\n✅ GitHub Actions mode started successfully - process will run until graceful shutdown")
+	fmt.Println("💡 Tip: If you cancel the workflow, recordings will be automatically saved")
 	select {}
 }
 

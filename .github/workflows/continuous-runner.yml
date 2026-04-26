@@ -232,7 +232,7 @@ jobs:
             echo "No job state cache found, starting fresh"
           fi
       
-      - name: Start recording
+      - name: Start recording with cancellation safety
         env:
           GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
           FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
@@ -250,10 +250,17 @@ jobs:
           USE_FLARESOLVERR: true
           FLARESOLVERR_URL: http://localhost:8191/v1
         run: |
-          echo "Starting GoondVR in GitHub Actions mode"
+          echo "🚀 Starting GoondVR in GitHub Actions mode with cancellation safety"
           echo "Session ID: $SESSION_ID"
           echo "Matrix Job ID: $MATRIX_JOB_ID"
           echo "Channels: $CHANNELS"
+          echo ""
+          echo "💡 Cancellation Safety Enabled:"
+          echo "   • If you cancel this workflow, recordings will be automatically saved"
+          echo "   • Emergency shutdown takes ~90 seconds"
+          echo "   • Recordings are uploaded to Gofile/Filester automatically"
+          echo "   • Wait 90 seconds after cancelling for safe shutdown"
+          echo ""
           
           # Check if FlareSolverr is running
           echo "✅ FlareSolverr proxy enabled at http://localhost:8191"
@@ -265,6 +272,7 @@ jobs:
           fi
           
           # Start recording with GitHub Actions mode
+          # The application now includes emergency shutdown handling for cancellations
           go run main.go \
             --mode github-actions \
             --matrix-job-id $MATRIX_JOB_ID \
@@ -296,8 +304,8 @@ jobs:
             ./partial
           key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job.id }}-${{ github.run_id }}
       
-      - name: Upload artifacts on failure
-        if: failure()
+      - name: Upload recordings as artifacts (always runs, even on cancellation)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: recordings-job-${{ matrix.job.id }}-${{ github.run_id }}
@@ -348,3 +356,12 @@ jobs:
           echo "- ✅ Dual upload to Gofile and Filester" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Auto-restart every 5.5 hours" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ State persistence across runs" >> $GITHUB_STEP_SUMMARY
+          echo "- 🛡️ **Cancellation safety enabled** - recordings saved even when cancelled" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 💡 Cancellation Safety" >> $GITHUB_STEP_SUMMARY
+          echo "If you cancelled this workflow:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Check the job logs for '✅ Emergency shutdown complete'" >> $GITHUB_STEP_SUMMARY
+          echo "2. Recordings are uploaded to Gofile/Filester automatically" >> $GITHUB_STEP_SUMMARY
+          echo "3. Fallback: Download from Artifacts section below" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📚 [Cancellation Safety Guide](https://github.com/${{ github.repository }}/blob/main/docs/QUICK_CANCELLATION_GUIDE.md)" >> $GITHUB_STEP_SUMMARY

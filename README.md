@@ -11,6 +11,7 @@ Features added in this version include:
 - Live stream thumbnails for streaming channels and previews for offline channels
 - Stripchat support
 - Discord webhook and `ntfy` notifications
+- **🛡️ Safe workflow cancellation** - Recordings are automatically saved even when GitHub Actions workflows are cancelled ([Quick Guide](docs/QUICK_CANCELLATION_GUIDE.md))
 
 Example dashboard and settings views from the current web UI.
 
@@ -31,6 +32,12 @@ Example dashboard and settings views from the current web UI.
 - **[docs/SIMPLE_SETUP.md](docs/SIMPLE_SETUP.md)** - Detailed setup with examples
 - **[FILE_STRUCTURE.md](FILE_STRUCTURE.md)** - Understanding file locations
 - **[README_DEV.md](README_DEV.md)** - Development guide
+
+## 🛡️ GitHub Actions Mode
+
+- **[docs/QUICK_CANCELLATION_GUIDE.md](docs/QUICK_CANCELLATION_GUIDE.md)** - Safe workflow cancellation (TL;DR)
+- **[docs/CANCELLATION_SAFETY.md](docs/CANCELLATION_SAFETY.md)** - Complete cancellation safety documentation
+- **[.github/workflows/continuous-runner.yml](.github/workflows/continuous-runner.yml)** - Main workflow with built-in emergency shutdown
 
 # Getting Started
 

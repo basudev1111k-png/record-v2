@@ -923,3 +923,86 @@ func (gam *GitHubActionsMode) StartWorkflowLifecycle(configDir, recordingsDir st
 	log.Println("Workflow lifecycle management started successfully")
 	return nil
 }
+
+// UploadCompletedRecordings scans the recordings directory for completed files
+// and uploads them to external storage. This is used during emergency shutdown
+// when the workflow is cancelled to ensure recordings are not lost.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout control
+//   - recordingsDir: Directory containing completed recordings
+//
+// Returns an error if the upload process fails critically.
+//
+// Requirements: 3.1, 3.7, 14.1
+func (gam *GitHubActionsMode) UploadCompletedRecordings(ctx context.Context, recordingsDir string) error {
+	log.Printf("[UploadCompletedRecordings] Scanning %s for completed recordings...", recordingsDir)
+	
+	// Scan the recordings directory for video files
+	entries, err := os.ReadDir(recordingsDir)
+	if err != nil {
+		return fmt.Errorf("failed to read recordings directory: %w", err)
+	}
+	
+	uploadCount := 0
+	errorCount := 0
+	
+	for _, entry := range entries {
+		// Skip directories
+		if entry.IsDir() {
+			continue
+		}
+		
+		// Only process video files (.ts, .mp4, .mkv)
+		name := entry.Name()
+		if !isVideoFile(name) {
+			continue
+		}
+		
+		filePath := recordingsDir + "/" + name
+		
+		// Check if context is cancelled
+		select {
+		case <-ctx.Done():
+			log.Printf("[UploadCompletedRecordings] Upload cancelled by context after %d files", uploadCount)
+			return ctx.Err()
+		default:
+		}
+		
+		// Upload the file
+		log.Printf("[UploadCompletedRecordings] Uploading %s...", name)
+		uploadResult, err := gam.StorageUploader.UploadRecording(ctx, filePath)
+		if err != nil {
+			log.Printf("[UploadCompletedRecordings] Failed to upload %s: %v", name, err)
+			errorCount++
+			continue
+		}
+		
+		log.Printf("[UploadCompletedRecordings] Successfully uploaded %s", name)
+		log.Printf("  - Gofile URL: %s", uploadResult.GofileURL)
+		log.Printf("  - Filester URL: %s", uploadResult.FilesterURL)
+		uploadCount++
+		
+		// Note: StorageUploader.UploadRecording already deletes the file after successful upload
+	}
+	
+	log.Printf("[UploadCompletedRecordings] Upload complete: %d successful, %d failed", uploadCount, errorCount)
+	
+	if errorCount > 0 {
+		return fmt.Errorf("failed to upload %d file(s)", errorCount)
+	}
+	
+	return nil
+}
+
+// isVideoFile checks if a filename has a video file extension
+func isVideoFile(filename string) bool {
+	// Check for common video file extensions
+	extensions := []string{".ts", ".mp4", ".mkv", ".flv", ".avi", ".mov", ".webm"}
+	for _, ext := range extensions {
+		if len(filename) >= len(ext) && filename[len(filename)-len(ext):] == ext {
+			return true
+		}
+	}
+	return false
+}
