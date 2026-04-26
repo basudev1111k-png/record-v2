@@ -206,6 +206,18 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 		fmt.Printf("[INFO] %s: Room page returned 404 (broadcaster may be cancelled or deleted)\n", cleanUsername)
 		return &Stream{}, internal.ErrChannelOffline
 	}
+	
+	// Check for offline indicators in HTML (before trying to parse)
+	if strings.Contains(htmlBody, "offline_tipping") || strings.Contains(htmlBody, "tip_offline") {
+		fmt.Printf("[INFO] %s: Channel is offline (detected from HTML markers)\n", cleanUsername)
+		return &Stream{}, internal.ErrChannelOffline
+	}
+	
+	// Check for private show indicators
+	if strings.Contains(htmlBody, "This room is currently in a private show") {
+		fmt.Printf("[INFO] %s: Channel is in private show\n", cleanUsername)
+		return &Stream{}, internal.ErrPrivateStream
+	}
 
 	// Parse initialRoomDossier from HTML
 	// Format: window.initialRoomDossier = "...escaped JSON..."
@@ -273,6 +285,28 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 		
 		fmt.Printf("[INFO] %s: Edge API Response - room_status=%q, url_present=%v\n", 
 			username, edgeResp.RoomStatus, edgeResp.URL != "")
+		
+		// Check if channel is genuinely offline
+		if edgeResp.RoomStatus == "offline" {
+			fmt.Printf("[INFO] %s: Channel is offline (confirmed by edge API)\n", username)
+			return &Stream{}, internal.ErrChannelOffline
+		}
+		
+		// Check for other non-available statuses
+		switch edgeResp.RoomStatus {
+		case "private":
+			fmt.Printf("[INFO] %s: Channel is in private show\n", username)
+			return &Stream{}, internal.ErrPrivateStream
+		case "hidden":
+			fmt.Printf("[INFO] %s: Channel is in hidden show\n", username)
+			return &Stream{}, internal.ErrHiddenStream
+		case "away":
+			fmt.Printf("[INFO] %s: Performer is away\n", username)
+			return &Stream{}, internal.ErrChannelOffline
+		case "password protected":
+			fmt.Printf("[INFO] %s: Room is password protected\n", username)
+			return &Stream{}, internal.ErrRoomPasswordRequired
+		}
 		
 		if edgeResp.URL != "" {
 			fmt.Printf("[INFO] %s: ✅ Edge API successful! HLS URL found\n", username)
