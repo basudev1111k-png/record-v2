@@ -159,7 +159,7 @@ jobs:
           echo ""
           
           # Check if there are any recordings in cache
-          if [ -d "./videos" ] && [ "$(ls -A ./videos/*.{ts,mp4,mkv} 2>/dev/null)" ]; then
+          if [ -d "./videos" ] && [ -n "$(find ./videos -maxdepth 1 -type f \( -name '*.ts' -o -name '*.mp4' -o -name '*.mkv' \) 2>/dev/null)" ]; then
             echo "✅ Found cached recordings to upload:"
             ls -lh ./videos/
             echo ""
@@ -256,7 +256,7 @@ jobs:
           UPLOADED_COUNT=0
           FAILED_COUNT=0
           
-          for video in ./videos/*.{ts,mp4,mkv} 2>/dev/null; do
+          for video in ./videos/*.ts ./videos/*.mp4 ./videos/*.mkv; do
             [ -f "$video" ] || continue
             
             FILENAME=$(basename "$video")
