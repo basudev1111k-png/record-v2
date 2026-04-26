@@ -172,9 +172,11 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 	domain := strings.TrimRight(server.Config.Domain, "/")
 	roomURL := fmt.Sprintf("%s/%s/", domain, cleanUsername)
 
-	// Build cookies from server config
-	cookies := internal.ParseCookies(server.Config.Cookies)
-
+	// CRITICAL: Do NOT pass cookies to FlareSolverr for room page requests
+	// Let FlareSolverr's Chrome browser establish its own fresh session
+	// Passing pre-existing cookies causes Chaturbate to redirect to homepage
+	// because the session isn't properly established for that specific room
+	
 	// Headers for the request
 	// CRITICAL: X-Requested-With header bypasses age gate
 	// Source: https://gist.github.com/you-cant-see-me/811ab5f9461b7aa0d69f59db7eed98ec
@@ -185,8 +187,9 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 	}
 
 	// Fetch room page through FlareSolverr's real Chrome browser
+	// Pass nil for cookies to let FlareSolverr establish a fresh session
 	fmt.Printf("[DEBUG] %s: Fetching room page via FlareSolverr: %s\n", cleanUsername, roomURL)
-	htmlBody, _, _, err := flare.GetWithCookiesAndUA(ctx, roomURL, cookies, headers)
+	htmlBody, _, _, err := flare.GetWithCookiesAndUA(ctx, roomURL, nil, headers)
 	if err != nil {
 		return nil, fmt.Errorf("flaresolverr room fetch failed: %w", err)
 	}
