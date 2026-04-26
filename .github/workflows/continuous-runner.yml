@@ -572,35 +572,62 @@ jobs:
         run: |
           echo "📦 Preparing stable recordings for cache..."
           
+          if [ ! -d "./videos" ]; then
+            echo "ℹ️  No videos directory found"
+            exit 0
+          fi
+          
+          # Check if there are any video files
+          VIDEO_FILES=$(find ./videos -type f \( -name "*.ts" -o -name "*.mp4" -o -name "*.mkv" \) 2>/dev/null)
+          if [ -z "$VIDEO_FILES" ]; then
+            echo "ℹ️  No video files found"
+            exit 0
+          fi
+          
           # Create a temporary directory for stable files
           mkdir -p ./videos-stable
           
+          STABLE_COUNT=0
+          OPEN_COUNT=0
+          
           # Copy only closed/stable video files
-          if [ -d "./videos" ]; then
-            for video in ./videos/*.ts ./videos/*.mp4 ./videos/*.mkv; do
-              [ -f "$video" ] || continue
-              
-              filename=$(basename "$video")
-              
-              # Check if file is still being written to
-              if lsof "$video" 2>/dev/null | grep -q .; then
-                echo "⚠️  Skipping $filename (still open)"
-              else
-                echo "✅ Copying $filename to stable cache"
-                cp "$video" "./videos-stable/$filename"
-              fi
-            done
+          for video in ./videos/*.ts ./videos/*.mp4 ./videos/*.mkv; do
+            [ -f "$video" ] || continue
             
-            # If we have stable files, replace videos directory
-            if [ "$(ls -A ./videos-stable 2>/dev/null)" ]; then
-              echo "✅ Prepared $(ls ./videos-stable | wc -l) stable file(s) for caching"
-              # Move stable files back to videos directory
-              rm -rf ./videos
-              mv ./videos-stable ./videos
+            filename=$(basename "$video")
+            
+            # Check if file is still being written to
+            if lsof "$video" 2>/dev/null | grep -q .; then
+              echo "⚠️  File still open: $filename (will keep in cache anyway)"
+              # Copy it anyway - better to have a potentially incomplete file than nothing
+              cp "$video" "./videos-stable/$filename"
+              OPEN_COUNT=$((OPEN_COUNT + 1))
             else
-              echo "ℹ️  No stable files to cache"
-              rm -rf ./videos-stable
+              echo "✅ File is closed: $filename"
+              cp "$video" "./videos-stable/$filename"
+              STABLE_COUNT=$((STABLE_COUNT + 1))
             fi
+          done
+          
+          echo ""
+          echo "📊 Summary:"
+          echo "   Closed files: $STABLE_COUNT"
+          echo "   Open files: $OPEN_COUNT"
+          echo "   Total files: $((STABLE_COUNT + OPEN_COUNT))"
+          
+          # If we have any files (stable or not), replace videos directory
+          if [ "$(ls -A ./videos-stable 2>/dev/null)" ]; then
+            echo "✅ Prepared $((STABLE_COUNT + OPEN_COUNT)) file(s) for caching"
+            # Move stable files back to videos directory
+            rm -rf ./videos
+            mv ./videos-stable ./videos
+            
+            echo ""
+            echo "📁 Final videos directory:"
+            ls -lh ./videos/
+          else
+            echo "⚠️  No files to cache (this shouldn't happen)"
+            rm -rf ./videos-stable
           fi
       
       - name: Save shared configuration cache
