@@ -158,12 +158,13 @@ func (f *FlareSolverrClient) GetWithCookies(ctx context.Context, url string, coo
 
 // GetWithCookiesAndUA makes a request and returns response, cookies, and User-Agent
 func (f *FlareSolverrClient) GetWithCookiesAndUA(ctx context.Context, url string, cookies map[string]string, headers map[string]string) (string, map[string]string, string, error) {
-	// Convert cookies to FlareSolverr format
+	// Convert cookies to FlareSolverr format with proper domain
 	var flareCookies []FlareCookie
 	for name, value := range cookies {
 		flareCookies = append(flareCookies, FlareCookie{
-			Name:  name,
-			Value: value,
+			Name:   name,
+			Value:  value,
+			Domain: ".chaturbate.com", // Set domain so cookies are sent with the request
 		})
 	}
 
@@ -220,12 +221,13 @@ func (f *FlareSolverrClient) GetWithCookiesAndUA(ctx context.Context, url string
 
 // PostWithCookiesAndUA makes a POST request and returns response, cookies, and User-Agent
 func (f *FlareSolverrClient) PostWithCookiesAndUA(ctx context.Context, url string, postData string, cookies map[string]string, headers map[string]string) (string, map[string]string, string, error) {
-	// Convert cookies to FlareSolverr format
+	// Convert cookies to FlareSolverr format with proper domain
 	var flareCookies []FlareCookie
 	for name, value := range cookies {
 		flareCookies = append(flareCookies, FlareCookie{
-			Name:  name,
-			Value: value,
+			Name:   name,
+			Value:  value,
+			Domain: ".chaturbate.com", // Set domain so cookies are sent with the request
 		})
 	}
 
