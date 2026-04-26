@@ -8,16 +8,34 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	cycletls "github.com/Danny-Dasilva/CycleTLS/cycletls"
 	"github.com/HeapOfChaos/goondvr/server"
 )
 
+// Global shared CycleTLS client for thread-safe concurrent requests
+var (
+	globalCycleTLS     cycletls.CycleTLS
+	cycleTLSOnce       sync.Once
+	cycleTLSInitialized bool
+)
+
+// initGlobalCycleTLS initializes the global CycleTLS client once
+func initGlobalCycleTLS() {
+	cycleTLSOnce.Do(func() {
+		if os.Getenv("USE_FLARESOLVERR") == "true" {
+			globalCycleTLS = cycletls.Init()
+			cycleTLSInitialized = true
+			fmt.Println("[INFO] Initialized shared CycleTLS client for concurrent requests")
+		}
+	})
+}
+
 // Req represents an HTTP client with customized settings.
 type Req struct {
 	client     *http.Client
-	cycleTLS   cycletls.CycleTLS // TLS fingerprint spoofing client for GitHub Actions
 	useCycle   bool              // when true, use CycleTLS instead of standard http.Client
 	isMedia    bool              // when true, omits browser-spoofing headers not needed for CDN media requests
 	referer    string            // CDN Referer/Origin override; only used when isMedia is true
@@ -28,16 +46,16 @@ func NewReq() *Req {
 	// Check if we should use CycleTLS (GitHub Actions mode with FlareSolverr)
 	useCycleTLS := os.Getenv("USE_FLARESOLVERR") == "true"
 	
+	// Initialize global CycleTLS client if needed
+	if useCycleTLS {
+		initGlobalCycleTLS()
+	}
+	
 	req := &Req{
 		client: &http.Client{
 			Transport: CreateTransport(),
 		},
 		useCycle: useCycleTLS,
-	}
-	
-	// Initialize CycleTLS if needed
-	if useCycleTLS {
-		req.cycleTLS = cycletls.Init()
 	}
 	
 	return req
@@ -49,17 +67,17 @@ func NewMediaReq() *Req {
 	// Check if we should use CycleTLS (GitHub Actions mode with FlareSolverr)
 	useCycleTLS := os.Getenv("USE_FLARESOLVERR") == "true"
 	
+	// Initialize global CycleTLS client if needed
+	if useCycleTLS {
+		initGlobalCycleTLS()
+	}
+	
 	req := &Req{
 		client: &http.Client{
 			Transport: CreateTransport(),
 		},
 		isMedia:  true,
 		useCycle: useCycleTLS,
-	}
-	
-	// Initialize CycleTLS if needed
-	if useCycleTLS {
-		req.cycleTLS = cycletls.Init()
 	}
 	
 	return req
@@ -71,6 +89,11 @@ func NewMediaReqWithReferer(referer string) *Req {
 	// Check if we should use CycleTLS (GitHub Actions mode with FlareSolverr)
 	useCycleTLS := os.Getenv("USE_FLARESOLVERR") == "true"
 	
+	// Initialize global CycleTLS client if needed
+	if useCycleTLS {
+		initGlobalCycleTLS()
+	}
+	
 	req := &Req{
 		client: &http.Client{
 			Transport: CreateTransport(),
@@ -78,11 +101,6 @@ func NewMediaReqWithReferer(referer string) *Req {
 		isMedia:  true,
 		referer:  referer,
 		useCycle: useCycleTLS,
-	}
-	
-	// Initialize CycleTLS if needed
-	if useCycleTLS {
-		req.cycleTLS = cycletls.Init()
 	}
 	
 	return req
@@ -226,7 +244,8 @@ func (h *Req) postWithCycleTLSReferer(ctx context.Context, url string, data stri
 		fmt.Printf("[DEBUG] CycleTLS POST data: %s\n", data)
 	}
 	
-	response, err := h.cycleTLS.Do(url, cycletls.Options{
+	// Uses the global shared CycleTLS instance for thread-safe concurrent requests
+	response, err := globalCycleTLS.Do(url, cycletls.Options{
 		Body:      data,
 		Ja3:       "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0",
 		UserAgent: server.Config.UserAgent,
@@ -507,7 +526,8 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 	
 	// Make request with CycleTLS using Chrome 120 profile
 	// This spoofs Chrome's TLS/HTTP2 fingerprint to bypass Cloudflare
-	response, err := h.cycleTLS.Do(url, cycletls.Options{
+	// Uses the global shared CycleTLS instance for thread-safe concurrent requests
+	response, err := globalCycleTLS.Do(url, cycletls.Options{
 		Body:      "",
 		Ja3:       "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0",
 		UserAgent: server.Config.UserAgent,
