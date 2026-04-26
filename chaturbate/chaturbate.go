@@ -246,6 +246,22 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 		
 		fmt.Printf("[DEBUG] %s: API response received (length: %d)\n", username, len(apiBody))
 		
+		// Check if response is HTML (age gate or room page) instead of JSON
+		if strings.HasPrefix(strings.TrimSpace(apiBody), "<") {
+			fmt.Printf("[DEBUG] %s: API returned HTML instead of JSON, trying to parse initialRoomDossier from it\n", username)
+			
+			// The API endpoint returned the room page HTML, try to parse it
+			stream, err := parseInitialRoomDossier(apiBody, cleanUsername)
+			if err != nil {
+				fmt.Printf("[WARN] %s: Could not parse initialRoomDossier from API HTML response: %v\n", username, err)
+				return &Stream{}, internal.ErrChannelOffline
+			}
+			
+			fmt.Printf("[INFO] %s: ✅ Parsed initialRoomDossier from API HTML response!\n", username)
+			return stream, nil
+		}
+		
+		// Try to parse as JSON
 		var resp apiResponse
 		if err := json.Unmarshal([]byte(apiBody), &resp); err != nil {
 			fmt.Printf("[ERROR] %s: Failed to parse API response: %v\n", username, err)
