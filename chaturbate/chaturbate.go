@@ -311,6 +311,22 @@ func parseInitialRoomDossier(html, username string) (*Stream, error) {
 			}
 		}
 		
+		// Also search for any mention of "initialRoomDossier" without the exact pattern
+		if idx := strings.Index(html, "initialRoomDossier"); idx != -1 {
+			start := idx - 100
+			if start < 0 {
+				start = 0
+			}
+			end := idx + 500
+			if end > len(html) {
+				end = len(html)
+			}
+			snippet := html[start:end]
+			fmt.Printf("[DEBUG] %s: Found 'initialRoomDossier' text at position %d: %s\n", username, idx, snippet)
+		} else {
+			fmt.Printf("[DEBUG] %s: String 'initialRoomDossier' not found anywhere in HTML\n", username)
+		}
+		
 		return nil, fmt.Errorf("initialRoomDossier not found in HTML (tried %d patterns)", len(patterns))
 	}
 
