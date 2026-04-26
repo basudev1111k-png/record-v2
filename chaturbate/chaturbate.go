@@ -211,9 +211,20 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 	// Format: window.initialRoomDossier = "...escaped JSON..."
 	stream, err := parseInitialRoomDossier(htmlBody, cleanUsername)
 	if err != nil {
-		// If we can't find initialRoomDossier, the channel is likely offline
-		// or the page structure has changed
+		// If we can't find initialRoomDossier, try to find HLS URL directly in the HTML
 		fmt.Printf("[INFO] %s: Could not parse initialRoomDossier: %v\n", username, err)
+		fmt.Printf("[INFO] %s: Searching for HLS stream URL directly in HTML...\n", username)
+		
+		// Search for .m3u8 URLs in the HTML
+		hlsURL := extractHLSURL(htmlBody)
+		if hlsURL != "" {
+			fmt.Printf("[INFO] %s: ✅ Found HLS URL directly in HTML!\n", username)
+			return &Stream{
+				HLSSource: hlsURL,
+			}, nil
+		}
+		
+		fmt.Printf("[DEBUG] %s: No HLS URL found in HTML\n", username)
 		
 		// Save HTML to file for debugging (only in CI mode)
 		if os.Getenv("GITHUB_ACTIONS") == "true" {
@@ -1487,4 +1498,49 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+
+// extractHLSURL searches for .m3u8 URLs directly in the HTML
+// This is a fallback when initialRoomDossier is not available
+func extractHLSURL(html string) string {
+	// Search for .m3u8 URLs in the HTML
+	// Common patterns:
+	// - https://edge*.stream.highwebmedia.com/.../*.m3u8
+	// - "hls_source":"https://..."
+	
+	// Pattern 1: Look for hls_source in JSON
+	if idx := strings.Index(html, `"hls_source":"`); idx != -1 {
+		start := idx + len(`"hls_source":"`)
+		end := strings.Index(html[start:], `"`)
+		if end != -1 {
+			url := html[start : start+end]
+			// Unescape JSON string
+			url = strings.ReplaceAll(url, `\/`, `/`)
+			if strings.Contains(url, ".m3u8") {
+				return url
+			}
+		}
+	}
+	
+	// Pattern 2: Look for any .m3u8 URL
+	m3u8Idx := strings.Index(html, ".m3u8")
+	if m3u8Idx != -1 {
+		// Find the start of the URL (look backwards for http)
+		start := strings.LastIndex(html[:m3u8Idx], "http")
+		if start != -1 {
+			// Find the end of the URL (look forward for quote or space)
+			end := m3u8Idx + len(".m3u8")
+			for end < len(html) && html[end] != '"' && html[end] != '\'' && html[end] != ' ' && html[end] != '<' {
+				end++
+			}
+			url := html[start:end]
+			// Clean up any escape sequences
+			url = strings.ReplaceAll(url, `\/`, `/`)
+			url = strings.ReplaceAll(url, `\u002F`, `/`)
+			return url
+		}
+	}
+	
+	return ""
 }
