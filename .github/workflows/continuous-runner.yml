@@ -122,7 +122,7 @@ jobs:
             ./videos
             ./state
             ./partial
-          key: state-run-${{ github.run_id }}-job-${{ matrix.job.id }}
+          key: state-run-${{ github.run_id }}-job-${{ matrix.job.id }}-never-match
           restore-keys: |
             state-run-
             state-latest-job-${{ matrix.job.id }}
