@@ -257,6 +257,9 @@ func (h *Req) SetRequestHeaders(req *http.Request) {
 		}
 		req.Header.Set("Referer", ref)
 		req.Header.Set("Origin", strings.TrimRight(ref, "/"))
+	} else {
+		// For API requests, always set Referer
+		req.Header.Set("Referer", "https://chaturbate.com/")
 	}
 	
 	if server.Config.UserAgent != "" {
@@ -266,6 +269,8 @@ func (h *Req) SetRequestHeaders(req *http.Request) {
 		cookies := ParseCookies(server.Config.Cookies)
 		
 		// Add CSRF token as header if present
+		// CRITICAL: Chaturbate requires X-CSRFToken header to match csrftoken cookie
+		// Source: https://gist.github.com/mywalkb/1c9a26a59018cf1af40eb2fe0e8dea33
 		if csrfToken, ok := cookies["csrftoken"]; ok {
 			req.Header.Set("X-CSRFToken", csrfToken)
 		}
@@ -313,6 +318,9 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 		}
 		headers["Referer"] = ref
 		headers["Origin"] = strings.TrimRight(ref, "/")
+	} else {
+		// For API requests, always set Referer
+		headers["Referer"] = "https://chaturbate.com/"
 	}
 	
 	if server.Config.UserAgent != "" {
@@ -327,6 +335,8 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 		headers["Cookie"] = cookieStr
 		
 		// Extract and add CSRF token as header if present
+		// CRITICAL: Chaturbate requires X-CSRFToken header to match csrftoken cookie
+		// Source: https://gist.github.com/mywalkb/1c9a26a59018cf1af40eb2fe0e8dea33
 		cookies := ParseCookies(cookieStr)
 		if csrfToken, ok := cookies["csrftoken"]; ok {
 			headers["X-CSRFToken"] = csrfToken
@@ -342,6 +352,9 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 		fmt.Printf("[DEBUG] CycleTLS X-Requested-With: %s\n", headers["X-Requested-With"])
 		if csrfToken, ok := headers["X-CSRFToken"]; ok {
 			fmt.Printf("[DEBUG] CycleTLS X-CSRFToken: %s\n", csrfToken[:minInt(20, len(csrfToken))]+"...")
+		}
+		if referer, ok := headers["Referer"]; ok {
+			fmt.Printf("[DEBUG] CycleTLS Referer: %s\n", referer)
 		}
 		fmt.Printf("[DEBUG] CycleTLS User-Agent: %s\n", server.Config.UserAgent[:minInt(80, len(server.Config.UserAgent))])
 	}
