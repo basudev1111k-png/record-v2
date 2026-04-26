@@ -69,18 +69,21 @@ jobs:
           
           # Delete old caches
           echo "🗑️  Deleting caches older than $MAX_AGE_DAYS days..."
+          
+          # Get list of cache IDs to delete
+          CACHE_IDS_TO_DELETE=$(gh cache list --json id,createdAt --limit 1000 | \
+            jq -r '.[] | select(.createdAt < "'$CUTOFF_DATE'") | .id')
+          
           DELETED_COUNT=0
           
-          # Get all cache IDs and created dates
-          gh cache list --json id,createdAt,key,sizeInBytes --limit 1000 | \
-            jq -r '.[] | select(.createdAt < "'$CUTOFF_DATE'") | .id' | \
-            while read -r cache_id; do
-              if [ -n "$cache_id" ]; then
-                echo "Deleting cache ID: $cache_id"
-                gh cache delete "$cache_id" || echo "Failed to delete cache $cache_id"
-                DELETED_COUNT=$((DELETED_COUNT + 1))
-              fi
-            done
+          # Delete each cache
+          for cache_id in $CACHE_IDS_TO_DELETE; do
+            if [ -n "$cache_id" ]; then
+              echo "Deleting cache ID: $cache_id"
+              gh cache delete "$cache_id" || echo "Failed to delete cache $cache_id"
+              DELETED_COUNT=$((DELETED_COUNT + 1))
+            fi
+          done
           
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
