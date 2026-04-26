@@ -264,6 +264,12 @@ func (h *Req) SetRequestHeaders(req *http.Request) {
 	}
 	if server.Config.Cookies != "" {
 		cookies := ParseCookies(server.Config.Cookies)
+		
+		// Add CSRF token as header if present
+		if csrfToken, ok := cookies["csrftoken"]; ok {
+			req.Header.Set("X-CSRFToken", csrfToken)
+		}
+		
 		for name, value := range cookies {
 			req.AddCookie(&http.Cookie{Name: name, Value: value})
 		}
@@ -320,6 +326,12 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 		cookieStr := strings.TrimSpace(server.Config.Cookies)
 		headers["Cookie"] = cookieStr
 		
+		// Extract and add CSRF token as header if present
+		cookies := ParseCookies(cookieStr)
+		if csrfToken, ok := cookies["csrftoken"]; ok {
+			headers["X-CSRFToken"] = csrfToken
+		}
+		
 		// Always log for debugging age gate issues
 		preview := cookieStr
 		if len(preview) > 100 {
@@ -328,6 +340,9 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 		fmt.Printf("[DEBUG] CycleTLS URL: %s\n", url)
 		fmt.Printf("[DEBUG] CycleTLS cookies: %s\n", preview)
 		fmt.Printf("[DEBUG] CycleTLS X-Requested-With: %s\n", headers["X-Requested-With"])
+		if csrfToken, ok := headers["X-CSRFToken"]; ok {
+			fmt.Printf("[DEBUG] CycleTLS X-CSRFToken: %s\n", csrfToken[:minInt(20, len(csrfToken))]+"...")
+		}
 		fmt.Printf("[DEBUG] CycleTLS User-Agent: %s\n", server.Config.UserAgent[:minInt(80, len(server.Config.UserAgent))])
 	}
 	
