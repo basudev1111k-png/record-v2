@@ -243,27 +243,45 @@ jobs:
             CHANNEL=$(echo "$filename" | sed 's/_[0-9].*$//')
             TIMESTAMP=$(echo "$filename" | sed 's/^.*_\([0-9-]*_[0-9-]*\)\..*$/\1/' | tr '_' ' ')
             
+            # Extract date for file organization (YYYY-MM-DD)
+            DATE=$(echo "$TIMESTAMP" | cut -d' ' -f1)
+            
             echo "  💾 Saving to database..."
             echo "     Channel: $CHANNEL"
+            echo "     Date: $DATE"
             echo "     Timestamp: $TIMESTAMP"
             echo "     URL: $gofile_url"
             
-            # Create database entry (JSON format)
-            mkdir -p ./database
-            ENTRY_FILE="./database/${CHANNEL}_$(date +%s).json"
+            # Create channel directory
+            mkdir -p "./database/$CHANNEL"
             
-            cat > "$ENTRY_FILE" << EOF
-          {
-            "channel": "$CHANNEL",
-            "timestamp": "$TIMESTAMP",
-            "gofile_url": "$gofile_url",
-            "filesize": $filesize,
-            "uploaded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "source": "cached_recording"
-          }
-          EOF
+            # Date-based JSON file
+            DB_FILE="./database/$CHANNEL/$DATE.json"
             
-            echo "  ✅ Database entry created: $ENTRY_FILE"
+            # Create new entry
+            NEW_ENTRY=$(cat << EOF
+{
+  "channel": "$CHANNEL",
+  "timestamp": "$TIMESTAMP",
+  "gofile_url": "$gofile_url",
+  "filesize": $filesize,
+  "uploaded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "source": "cached_recording"
+}
+EOF
+)
+            
+            # If file exists, append to array; otherwise create new array
+            if [ -f "$DB_FILE" ]; then
+              # Read existing array, add new entry, write back
+              TMP_FILE="${DB_FILE}.tmp"
+              jq --argjson entry "$NEW_ENTRY" '. += [$entry]' "$DB_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$DB_FILE"
+            else
+              # Create new array with single entry
+              echo "[$NEW_ENTRY]" | jq '.' > "$DB_FILE"
+            fi
+            
+            echo "  ✅ Database entry added to: $DB_FILE"
           }
           
           # Process each video file
@@ -320,6 +338,68 @@ jobs:
           
           echo ""
           echo "📦 Cache processing complete - ready to start fresh recording"
+      
+      - name: Commit database after cached uploads
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "📦 Committing database after cached uploads..."
+          
+          # Configure git
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Check if database directory exists and has files
+          if [ -d "./database" ] && [ "$(ls -A ./database 2>/dev/null)" ]; then
+            echo "✅ Database directory found with files"
+            ls -lh ./database/
+            
+            # Add all database files (organized by channel/date)
+            git add ./database/*/*.json 2>/dev/null || true
+            
+            # Check if there are changes to commit
+            if git diff --staged --quiet; then
+              echo "ℹ️  No new database entries to commit"
+            else
+              # Commit with cached upload flag
+              COMMIT_MSG="chore: update recording database (cached uploads) [skip ci]
+
+Job: ${{ matrix.job.id }}
+Channel: ${{ matrix.job.channel }}
+Run ID: ${{ github.run_id }}
+Session: ${{ needs.validate.outputs.session_id }}
+Source: Cached recordings from previous run
+Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              
+              git commit -m "$COMMIT_MSG"
+              
+              # Push with retry logic
+              MAX_RETRIES=3
+              RETRY_COUNT=0
+              
+              while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+                echo "Attempting to push (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)..."
+                
+                if git push origin HEAD:main; then
+                  echo "✅ Database successfully pushed to repository"
+                  break
+                else
+                  RETRY_COUNT=$((RETRY_COUNT + 1))
+                  if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                    echo "⚠️  Push failed, retrying in 5 seconds..."
+                    sleep 5
+                    # Pull latest changes before retrying
+                    git pull --rebase origin main || true
+                  else
+                    echo "❌ Failed to push database after $MAX_RETRIES attempts"
+                    echo "Database files are still saved in artifacts"
+                  fi
+                fi
+              done
+            fi
+          else
+            echo "ℹ️  No database directory or files found"
+          fi
       
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -581,6 +661,68 @@ jobs:
           echo ""
           echo "🛡️ Emergency cleanup complete - recordings ready for cache"
       
+      - name: Emergency database commit (runs on cancellation/timeout)
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "📦 Emergency database commit..."
+          
+          # Configure git
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Check if database directory exists and has files
+          if [ -d "./database" ] && [ "$(ls -A ./database 2>/dev/null)" ]; then
+            echo "✅ Database directory found with files"
+            ls -lh ./database/
+            
+            # Add all database files (organized by channel/date)
+            git add ./database/*/*.json 2>/dev/null || true
+            
+            # Check if there are changes to commit
+            if git diff --staged --quiet; then
+              echo "ℹ️  No new database entries to commit"
+            else
+              # Commit with emergency flag
+              COMMIT_MSG="chore: emergency database update [skip ci]
+
+Job: ${{ matrix.job.id }}
+Channel: ${{ matrix.job.channel }}
+Run ID: ${{ github.run_id }}
+Session: ${{ needs.validate.outputs.session_id }}
+Status: Emergency/Timeout
+Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              
+              git commit -m "$COMMIT_MSG"
+              
+              # Push with retry logic
+              MAX_RETRIES=3
+              RETRY_COUNT=0
+              
+              while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+                echo "Attempting to push (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)..."
+                
+                if git push origin HEAD:main; then
+                  echo "✅ Emergency database successfully pushed to repository"
+                  break
+                else
+                  RETRY_COUNT=$((RETRY_COUNT + 1))
+                  if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                    echo "⚠️  Push failed, retrying in 3 seconds..."
+                    sleep 3
+                    # Pull latest changes before retrying
+                    git pull --rebase origin main || true
+                  else
+                    echo "❌ Failed to push database after $MAX_RETRIES attempts"
+                    echo "Database files are still saved in artifacts"
+                  fi
+                fi
+              done
+            fi
+          else
+            echo "ℹ️  No database directory or files found"
+          fi
+      
       - name: Prepare stable recordings for cache
         if: always()
         run: |
@@ -679,6 +821,67 @@ jobs:
             ./logs/**/*
           retention-days: 7
           if-no-files-found: ignore
+      
+      - name: Commit and push database to repository
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "📦 Committing database to repository..."
+          
+          # Configure git
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Check if database directory exists and has files
+          if [ -d "./database" ] && [ "$(ls -A ./database 2>/dev/null)" ]; then
+            echo "✅ Database directory found with files"
+            ls -lh ./database/
+            
+            # Add all database files (organized by channel/date)
+            git add ./database/*/*.json 2>/dev/null || true
+            
+            # Check if there are changes to commit
+            if git diff --staged --quiet; then
+              echo "ℹ️  No new database entries to commit"
+            else
+              # Commit with detailed message
+              COMMIT_MSG="chore: update recording database [skip ci]
+
+Job: ${{ matrix.job.id }}
+Channel: ${{ matrix.job.channel }}
+Run ID: ${{ github.run_id }}
+Session: ${{ needs.validate.outputs.session_id }}
+Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              
+              git commit -m "$COMMIT_MSG"
+              
+              # Push with retry logic
+              MAX_RETRIES=3
+              RETRY_COUNT=0
+              
+              while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+                echo "Attempting to push (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)..."
+                
+                if git push origin HEAD:main; then
+                  echo "✅ Database successfully pushed to repository"
+                  break
+                else
+                  RETRY_COUNT=$((RETRY_COUNT + 1))
+                  if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                    echo "⚠️  Push failed, retrying in 5 seconds..."
+                    sleep 5
+                    # Pull latest changes before retrying
+                    git pull --rebase origin main || true
+                  else
+                    echo "❌ Failed to push database after $MAX_RETRIES attempts"
+                    echo "Database files are still saved in artifacts"
+                  fi
+                fi
+              done
+            fi
+          else
+            echo "ℹ️  No database directory or files found (no recordings uploaded yet)"
+          fi
       
       - name: Update status file
         if: always()

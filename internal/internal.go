@@ -20,8 +20,8 @@ func FormatDuration(duration float64) string {
 	return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
 }
 
-// FormatFilesize converts an int filesize in bytes to a human-readable string (KB, MB, GB).
-func FormatFilesize(filesize int) string {
+// FormatFilesize converts an int64 filesize in bytes to a human-readable string (KB, MB, GB).
+func FormatFilesize(filesize int64) string {
 	if filesize == 0 {
 		return ""
 	}

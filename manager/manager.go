@@ -663,6 +663,17 @@ func (m *Manager) GetStats() server.StatsResponse {
 	}
 }
 
+// CheckDiskSpace returns the current disk usage percentage for the recording directory.
+// Returns 0 if disk stats are not available (e.g., on Windows).
+func (m *Manager) CheckDiskSpace() float64 {
+	recPath := recordingDir(server.Config.Pattern)
+	disk, err := getDiskStats(recPath)
+	if err != nil {
+		return 0
+	}
+	return disk.Percent
+}
+
 // diskMonitor runs every 5 minutes and fires notifications when disk usage
 // crosses the configured warning or critical thresholds.
 func (m *Manager) diskMonitor() {

@@ -241,7 +241,7 @@ func (ch *Channel) ShouldSwitchFile() bool {
 }
 
 func (ch *Channel) shouldSwitchFileLocked() bool {
-	maxFilesizeBytes := ch.Config.MaxFilesize * 1024 * 1024
+	maxFilesizeBytes := int64(ch.Config.MaxFilesize) * 1024 * 1024
 	maxDurationSeconds := ch.Config.MaxDuration * 60
 
 	return (ch.Duration >= float64(maxDurationSeconds) && ch.Config.MaxDuration > 0) ||

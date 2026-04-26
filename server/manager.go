@@ -24,6 +24,7 @@ type IManager interface {
 	ReportCFBlock(username string)
 	ResetCFBlock(username string)
 	GetStats() StatsResponse
+	CheckDiskSpace() float64
 }
 
 // StatsResponse holds system stats returned by the /api/stats endpoint.

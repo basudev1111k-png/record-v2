@@ -14,4 +14,6 @@ var (
 	ErrPaused            = errors.New("channel paused")
 	ErrStopped           = errors.New("channel stopped")
 	ErrNotFound          = errors.New("segment not found (404)")
+	ErrStreamEnded       = errors.New("stream ended")
+	ErrDiskSpaceCritical = errors.New("disk space critical")
 )
