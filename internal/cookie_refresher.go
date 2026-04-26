@@ -157,12 +157,9 @@ func (f *FlareSolverrClient) GetWithCookies(ctx context.Context, url string, coo
 }
 
 // GetWithCookiesAndUA makes a request and returns response, cookies, and User-Agent
+// Note: In GitHub Actions matrix jobs, each job has its own FlareSolverr service container,
+// so concurrent requests within a single job are safe and don't need serialization.
 func (f *FlareSolverrClient) GetWithCookiesAndUA(ctx context.Context, url string, cookies map[string]string, headers map[string]string) (string, map[string]string, string, error) {
-	// Serialize FlareSolverr requests using a global mutex
-	// FlareSolverr uses a single Chrome browser and can only handle one request at a time
-	flareSolverrMutex.Lock()
-	defer flareSolverrMutex.Unlock()
-	
 	// Convert cookies to FlareSolverr format with proper domain
 	var flareCookies []FlareCookie
 	for name, value := range cookies {
@@ -225,12 +222,9 @@ func (f *FlareSolverrClient) GetWithCookiesAndUA(ctx context.Context, url string
 }
 
 // PostWithCookiesAndUA makes a POST request and returns response, cookies, and User-Agent
+// Note: In GitHub Actions matrix jobs, each job has its own FlareSolverr service container,
+// so concurrent requests within a single job are safe and don't need serialization.
 func (f *FlareSolverrClient) PostWithCookiesAndUA(ctx context.Context, url string, postData string, cookies map[string]string, headers map[string]string) (string, map[string]string, string, error) {
-	// Serialize FlareSolverr requests using a global mutex
-	// FlareSolverr uses a single Chrome browser and can only handle one request at a time
-	flareSolverrMutex.Lock()
-	defer flareSolverrMutex.Unlock()
-	
 	// Convert cookies to FlareSolverr format with proper domain
 	var flareCookies []FlareCookie
 	for name, value := range cookies {
