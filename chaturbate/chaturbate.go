@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -91,13 +92,23 @@ type apiResponse struct {
 }
 
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
-	fmt.Printf("[DEBUG] %s: Trying both API endpoints for better detection\n", username)
-	
-	// Try legacy API first
-	legacyStream, legacyErr := fetchStreamLegacy(ctx, client, username)
-	if legacyErr == nil && legacyStream != nil && legacyStream.HLSSource != "" {
-		fmt.Printf("[INFO] %s: Legacy API returned stream successfully\n", username)
-		return legacyStream, nil
+	var legacyStream *Stream
+	var legacyErr error
+
+	// In CI mode (CycleTLS), skip the legacy API entirely.
+	// /api/chatvideocontext/ always returns "age-gate-required" because the
+	// AG_Key cookie is session-bound to FlareSolverr's Chrome browser and
+	// cannot be reused by CycleTLS. The HLS API doesn't need age verification.
+	// Ref: https://gist.github.com/mywalkb/1c9a26a59018cf1af40eb2fe0e8dea33
+	if os.Getenv("USE_FLARESOLVERR") != "true" {
+		fmt.Printf("[DEBUG] %s: Trying both API endpoints for better detection\n", username)
+		legacyStream, legacyErr = fetchStreamLegacy(ctx, client, username)
+		if legacyErr == nil && legacyStream != nil && legacyStream.HLSSource != "" {
+			fmt.Printf("[INFO] %s: Legacy API returned stream successfully\n", username)
+			return legacyStream, nil
+		}
+	} else {
+		fmt.Printf("[DEBUG] %s: CI mode - using HLS API directly (skipping age-gated legacy API)\n", username)
 	}
 	
 	// Try alternative HLS API endpoint
@@ -106,12 +117,14 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 	// Source: https://gist.github.com/mywalkb/1c9a26a59018cf1af40eb2fe0e8dea33
 	
 	apiURL := fmt.Sprintf("%sget_edge_hls_url_ajax/", server.Config.Domain)
-	fmt.Printf("[DEBUG] %s: Calling HLS API: %s\n", username, apiURL)
+	roomReferer := fmt.Sprintf("%s%s/", server.Config.Domain, username)
+	fmt.Printf("[DEBUG] %s: Calling HLS API: %s (Referer: %s)\n", username, apiURL, roomReferer)
 	
-	// This endpoint requires POST with form data
+	// This endpoint requires POST with form data and a room-specific Referer
+	// Ref: https://gist.github.com/mywalkb/1c9a26a59018cf1af40eb2fe0e8dea33
 	postData := fmt.Sprintf("room_slug=%s&bandwidth=high", username)
 	
-	body, err := client.Post(ctx, apiURL, postData)
+	body, err := client.PostWithReferer(ctx, apiURL, postData, roomReferer)
 	if err != nil {
 		fmt.Printf("[ERROR] %s: HLS API call failed: %v\n", username, err)
 		// Return the legacy error if both failed
@@ -267,6 +280,11 @@ type bioResponse struct {
 // FetchLastBroadcast calls the biocontext API and returns the last_broadcast
 // time as a Unix timestamp, or 0 if unavailable.
 func FetchLastBroadcast(ctx context.Context, req *internal.Req, username string) (int64, error) {
+	// biocontext API also requires age verification cookies — skip in CI mode
+	// where the AG_Key cookie is session-bound to FlareSolverr's Chrome
+	if os.Getenv("USE_FLARESOLVERR") == "true" {
+		return 0, nil
+	}
 	apiURL := fmt.Sprintf("%sapi/biocontext/%s/", server.Config.Domain, username)
 	body, err := req.Get(ctx, apiURL)
 	if err != nil {

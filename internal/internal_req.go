@@ -143,13 +143,69 @@ func (h *Req) Post(ctx context.Context, url string, data string) (string, error)
 	return string(b), nil
 }
 
+// PostWithReferer sends an HTTP POST request with form data and a custom Referer header.
+// This is needed for endpoints like /get_edge_hls_url_ajax/ which require a room-specific Referer.
+func (h *Req) PostWithReferer(ctx context.Context, url string, data string, referer string) (string, error) {
+	// Use CycleTLS if enabled (GitHub Actions mode)
+	if h.useCycle {
+		return h.postWithCycleTLSReferer(ctx, url, data, referer)
+	}
+	
+	// Standard HTTP client path
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("new request: %w", err)
+	}
+	
+	// Set content type for form data
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.SetRequestHeaders(req)
+	// Override Referer with room-specific value
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("client do: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if server.Config.Debug && resp.StatusCode >= 400 {
+		fmt.Printf("[DEBUG] HTTP %d: %s\n", resp.StatusCode, req.URL)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", ErrNotFound
+	}
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read body: %w", err)
+	}
+
+	return string(b), nil
+}
+
 // PostWithCycleTLS sends an HTTP POST request using CycleTLS.
 func (h *Req) PostWithCycleTLS(ctx context.Context, url string, data string) (string, error) {
+	return h.postWithCycleTLSReferer(ctx, url, data, "")
+}
+
+// postWithCycleTLSReferer sends an HTTP POST request using CycleTLS with an optional custom Referer.
+func (h *Req) postWithCycleTLSReferer(ctx context.Context, url string, data string, referer string) (string, error) {
 	// Build headers map
 	headers := make(map[string]string)
 	headers["Content-Type"] = "application/x-www-form-urlencoded"
 	headers["X-Requested-With"] = "XMLHttpRequest"
-	headers["Referer"] = "https://chaturbate.com/"
+	if referer != "" {
+		headers["Referer"] = referer
+	} else {
+		headers["Referer"] = "https://chaturbate.com/"
+	}
 	
 	if server.Config.UserAgent != "" {
 		headers["User-Agent"] = server.Config.UserAgent
@@ -165,8 +221,10 @@ func (h *Req) PostWithCycleTLS(ctx context.Context, url string, data string) (st
 		}
 	}
 	
-	fmt.Printf("[DEBUG] CycleTLS POST URL: %s\n", url)
-	fmt.Printf("[DEBUG] CycleTLS POST data: %s\n", data)
+	if server.Config.Debug {
+		fmt.Printf("[DEBUG] CycleTLS POST URL: %s\n", url)
+		fmt.Printf("[DEBUG] CycleTLS POST data: %s\n", data)
+	}
 	
 	response, err := h.cycleTLS.Do(url, cycletls.Options{
 		Body:      data,
@@ -428,21 +486,23 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 			headers["X-CSRFToken"] = csrfToken
 		}
 		
-		// Always log for debugging age gate issues
-		preview := cookieStr
-		if len(preview) > 100 {
-			preview = preview[:100] + "..."
+		// Log CycleTLS request details only in debug mode
+		if server.Config.Debug {
+			preview := cookieStr
+			if len(preview) > 100 {
+				preview = preview[:100] + "..."
+			}
+			fmt.Printf("[DEBUG] CycleTLS URL: %s\n", url)
+			fmt.Printf("[DEBUG] CycleTLS cookies: %s\n", preview)
+			fmt.Printf("[DEBUG] CycleTLS X-Requested-With: %s\n", headers["X-Requested-With"])
+			if csrfToken, ok := headers["X-CSRFToken"]; ok {
+				fmt.Printf("[DEBUG] CycleTLS X-CSRFToken: %s\n", csrfToken[:minInt(20, len(csrfToken))]+"...")
+			}
+			if referer, ok := headers["Referer"]; ok {
+				fmt.Printf("[DEBUG] CycleTLS Referer: %s\n", referer)
+			}
+			fmt.Printf("[DEBUG] CycleTLS User-Agent: %s\n", server.Config.UserAgent[:minInt(80, len(server.Config.UserAgent))])
 		}
-		fmt.Printf("[DEBUG] CycleTLS URL: %s\n", url)
-		fmt.Printf("[DEBUG] CycleTLS cookies: %s\n", preview)
-		fmt.Printf("[DEBUG] CycleTLS X-Requested-With: %s\n", headers["X-Requested-With"])
-		if csrfToken, ok := headers["X-CSRFToken"]; ok {
-			fmt.Printf("[DEBUG] CycleTLS X-CSRFToken: %s\n", csrfToken[:minInt(20, len(csrfToken))]+"...")
-		}
-		if referer, ok := headers["Referer"]; ok {
-			fmt.Printf("[DEBUG] CycleTLS Referer: %s\n", referer)
-		}
-		fmt.Printf("[DEBUG] CycleTLS User-Agent: %s\n", server.Config.UserAgent[:minInt(80, len(server.Config.UserAgent))])
 	}
 	
 	// Make request with CycleTLS using Chrome 120 profile
