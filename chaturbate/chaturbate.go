@@ -91,32 +91,38 @@ type apiResponse struct {
 }
 
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
-	// IMPORTANT: Visit the homepage first to accept age verification
-	// Then visit the room page to establish session
-	// Chaturbate's API requires this to return hls_source for public streams
-	homeURL := strings.TrimSuffix(server.Config.Domain, "/")
-	fmt.Printf("[DEBUG] %s: Visiting homepage to establish session: %s\n", username, homeURL)
-	_, err := client.Get(ctx, homeURL)
-	if err != nil {
-		// Homepage visit can fail with age verification, but that's OK
-		// The cookies should handle it
-		fmt.Printf("[DEBUG] %s: Homepage visit had issue (continuing): %v\n", username, err)
-	} else {
-		fmt.Printf("[DEBUG] %s: Homepage visit successful\n", username)
-	}
-	
-	// Now visit the specific room page
-	roomURL := fmt.Sprintf("%s%s/", server.Config.Domain, username)
-	fmt.Printf("[DEBUG] %s: Visiting room page: %s\n", username, roomURL)
-	roomBody, err := client.Get(ctx, roomURL)
-	if err != nil {
-		fmt.Printf("[WARN] %s: Room page visit failed: %v\n", username, err)
-	} else {
-		fmt.Printf("[DEBUG] %s: Room page visit successful (body length: %d)\n", username, len(roomBody))
-		// Check if we're getting age verification page
-		if strings.Contains(roomBody, "Verify your age") {
-			fmt.Printf("[ERROR] %s: Age verification page detected - cookies may not be working\n", username)
+	// When using FlareSolverr, skip homepage/room visits since FlareSolverr already established the session
+	// The cookies from FlareSolverr should be sufficient
+	if !internal.IsFlareSolverrEnabled() {
+		// IMPORTANT: Visit the homepage first to accept age verification
+		// Then visit the room page to establish session
+		// Chaturbate's API requires this to return hls_source for public streams
+		homeURL := strings.TrimSuffix(server.Config.Domain, "/")
+		fmt.Printf("[DEBUG] %s: Visiting homepage to establish session: %s\n", username, homeURL)
+		_, err := client.Get(ctx, homeURL)
+		if err != nil {
+			// Homepage visit can fail with age verification, but that's OK
+			// The cookies should handle it
+			fmt.Printf("[DEBUG] %s: Homepage visit had issue (continuing): %v\n", username, err)
+		} else {
+			fmt.Printf("[DEBUG] %s: Homepage visit successful\n", username)
 		}
+		
+		// Now visit the specific room page
+		roomURL := fmt.Sprintf("%s%s/", server.Config.Domain, username)
+		fmt.Printf("[DEBUG] %s: Visiting room page: %s\n", username, roomURL)
+		roomBody, err := client.Get(ctx, roomURL)
+		if err != nil {
+			fmt.Printf("[WARN] %s: Room page visit failed: %v\n", username, err)
+		} else {
+			fmt.Printf("[DEBUG] %s: Room page visit successful (body length: %d)\n", username, len(roomBody))
+			// Check if we're getting age verification page
+			if strings.Contains(roomBody, "Verify your age") {
+				fmt.Printf("[ERROR] %s: Age verification page detected - cookies may not be working\n", username)
+			}
+		}
+	} else {
+		fmt.Printf("[DEBUG] %s: Skipping homepage/room visits (using FlareSolverr session)\n", username)
 	}
 	
 	apiURL := fmt.Sprintf("%sapi/chatvideocontext/%s/", server.Config.Domain, username)
