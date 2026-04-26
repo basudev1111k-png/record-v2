@@ -221,6 +221,23 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 			}
 		}
 		
+		// FALLBACK: Try the legacy API endpoint as a last resort
+		// This might work even when initialRoomDossier is missing
+		fmt.Printf("[INFO] %s: Trying legacy API as fallback...\n", username)
+		
+		// Create a client with the same configuration
+		client := internal.NewReq()
+		
+		legacyStream, legacyErr := fetchStreamLegacy(ctx, client, cleanUsername)
+		if legacyErr == nil && legacyStream != nil && legacyStream.HLSSource != "" {
+			fmt.Printf("[INFO] %s: ✅ Legacy API fallback successful! HLS URL found\n", username)
+			return legacyStream, nil
+		}
+		
+		if legacyErr != nil {
+			fmt.Printf("[WARN] %s: Legacy API fallback also failed: %v\n", username, legacyErr)
+		}
+		
 		return &Stream{}, internal.ErrChannelOffline
 	}
 
