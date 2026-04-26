@@ -64,21 +64,33 @@ func RefreshCookiesWithFlareSolverr(ctx context.Context) error {
 		break
 	}
 
-	// Step 2: Visit a public room page to establish a proper session
-	// This ensures we get all necessary session cookies
-	// Using a known public room to trigger session creation
-	testRoomURL := chaturbateURL + "/tester/"
-	log.Printf("   Step 2: Establishing session by visiting test room...")
+	// Step 2: Visit a public room page to establish a proper session AND accept age gate
+	// This ensures we get all necessary session cookies including age verification
+	// Using a well-known always-online room to ensure success
+	testRoomURL := chaturbateURL + "/siswet19/"  // Popular room, usually online
+	log.Printf("   Step 2: Visiting room to accept age gate and establish session...")
 	_, cookies2, _, err := flare.GetWithCookiesAndUA(ctx, testRoomURL, cookies, headers)
 	if err != nil {
-		// Room visit might fail, but we can continue with cookies from step 1
-		log.Printf("   Warning: Room visit failed (continuing): %v", err)
+		// Try alternative room if first fails
+		log.Printf("   Warning: First room visit failed, trying alternative...")
+		testRoomURL = chaturbateURL + "/tessa_swan/"
+		_, cookies2, _, err = flare.GetWithCookiesAndUA(ctx, testRoomURL, cookies, headers)
+		if err != nil {
+			// Room visit might fail, but we can continue with cookies from step 1
+			log.Printf("   Warning: Room visits failed (continuing): %v", err)
+		} else {
+			// Merge cookies from both requests
+			for name, value := range cookies2 {
+				cookies[name] = value
+			}
+			log.Println("   ✅ Session established with age verification")
+		}
 	} else {
 		// Merge cookies from both requests
 		for name, value := range cookies2 {
 			cookies[name] = value
 		}
-		log.Println("   ✅ Session established")
+		log.Println("   ✅ Session established with age verification")
 	}
 
 	// Extract cf_clearance cookie
