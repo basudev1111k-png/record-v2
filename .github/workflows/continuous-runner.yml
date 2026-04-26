@@ -122,9 +122,9 @@ jobs:
             ./videos
             ./state
             ./partial
-          key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job.id }}-${{ github.run_id }}
+          key: state-run-${{ github.run_id }}-job-${{ matrix.job.id }}
           restore-keys: |
-            state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job.id }}-
+            state-run-
             state-latest-job-${{ matrix.job.id }}
       
       - name: Upload cached recordings from previous run
@@ -505,7 +505,7 @@ jobs:
             ./videos
             ./state
             ./partial
-          key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job.id }}-${{ github.run_id }}
+          key: state-run-${{ github.run_id }}-job-${{ matrix.job.id }}
       
       - name: Upload recordings as artifacts (always runs, even on cancellation)
         if: always()
