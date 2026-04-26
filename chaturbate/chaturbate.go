@@ -234,76 +234,61 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 			}
 		}
 		
-		// FALLBACK: Try the legacy API endpoint as a last resort
-		// This might work even when initialRoomDossier is missing
-		fmt.Printf("[INFO] %s: Trying legacy API via FlareSolverr as fallback...\n", username)
+		// FALLBACK: Try the edge HLS URL AJAX API endpoint
+		// This is the current method used by yt-dlp
+		fmt.Printf("[INFO] %s: Trying edge HLS URL API as fallback...\n", username)
 		
-		// Use FlareSolverr to call the API endpoint (bypasses age gate)
-		apiURL := fmt.Sprintf("%sapi/chatvideocontext/%s/", server.Config.Domain, cleanUsername)
-		fmt.Printf("[DEBUG] %s: Calling API via FlareSolverr: %s\n", username, apiURL)
+		edgeAPIURL := fmt.Sprintf("%sget_edge_hls_url_ajax/", server.Config.Domain)
+		fmt.Printf("[DEBUG] %s: Calling edge API: %s\n", username, edgeAPIURL)
 		
-		// Use the same headers to bypass age gate
+		// POST data
+		postData := fmt.Sprintf("room_slug=%s", cleanUsername)
+		
+		// Headers for the API call
 		apiHeaders := map[string]string{
-			"Accept":           "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-			"Accept-Language":  "en-US,en;q=0.5",
-			"X-Requested-With": "XMLHttpRequest", // CRITICAL: Bypass age gate
+			"Accept":           "application/json",
+			"Content-Type":     "application/x-www-form-urlencoded",
+			"X-Requested-With": "XMLHttpRequest",
 		}
 		
-		apiBody, _, _, err := flare.GetWithCookiesAndUA(ctx, apiURL, cookies, apiHeaders)
+		apiBody, _, _, err := flare.PostWithCookiesAndUA(ctx, edgeAPIURL, postData, cookies, apiHeaders)
 		if err != nil {
-			fmt.Printf("[WARN] %s: FlareSolverr API call failed: %v\n", username, err)
+			fmt.Printf("[WARN] %s: Edge API call failed: %v\n", username, err)
 			return &Stream{}, internal.ErrChannelOffline
 		}
 		
-		fmt.Printf("[DEBUG] %s: API response received (length: %d)\n", username, len(apiBody))
+		fmt.Printf("[DEBUG] %s: Edge API response received (length: %d)\n", username, len(apiBody))
 		
-		// Check if response is HTML (age gate or room page) instead of JSON
-		if strings.HasPrefix(strings.TrimSpace(apiBody), "<") {
-			fmt.Printf("[DEBUG] %s: API returned HTML instead of JSON, trying to parse initialRoomDossier from it\n", username)
-			
-			// The API endpoint returned the room page HTML, try to parse it
-			stream, err := parseInitialRoomDossier(apiBody, cleanUsername)
-			if err != nil {
-				fmt.Printf("[WARN] %s: Could not parse initialRoomDossier from API HTML response: %v\n", username, err)
-				return &Stream{}, internal.ErrChannelOffline
-			}
-			
-			fmt.Printf("[INFO] %s: ✅ Parsed initialRoomDossier from API HTML response!\n", username)
-			return stream, nil
+		// Parse JSON response
+		var edgeResp struct {
+			URL        string `json:"url"`
+			RoomStatus string `json:"room_status"`
 		}
 		
-		// Try to parse as JSON
-		var resp apiResponse
-		if err := json.Unmarshal([]byte(apiBody), &resp); err != nil {
-			fmt.Printf("[ERROR] %s: Failed to parse API response: %v\n", username, err)
-			fmt.Printf("[ERROR] %s: Raw response (first 500 chars): %s\n", username, truncate(apiBody, 500))
+		if err := json.Unmarshal([]byte(apiBody), &edgeResp); err != nil {
+			fmt.Printf("[ERROR] %s: Failed to parse edge API response: %v\n", username, err)
+			fmt.Printf("[ERROR] %s: Raw response: %s\n", username, truncate(apiBody, 500))
 			return &Stream{}, internal.ErrChannelOffline
 		}
 		
-		fmt.Printf("[INFO] %s: API Response - room_status=%q, hls_source_present=%v, code=%q, num_viewers=%d\n", 
-			username, resp.RoomStatus, resp.HLSSource != "", resp.Code, resp.NumViewers)
+		fmt.Printf("[INFO] %s: Edge API Response - room_status=%q, url_present=%v\n", 
+			username, edgeResp.RoomStatus, edgeResp.URL != "")
 		
-		if resp.HLSSource != "" {
-			fmt.Printf("[INFO] %s: ✅ Legacy API via FlareSolverr successful! HLS URL found\n", username)
+		if edgeResp.URL != "" {
+			fmt.Printf("[INFO] %s: ✅ Edge API successful! HLS URL found\n", username)
 			
 			// Clean up fast_start parameter
-			hlsURL := resp.HLSSource
+			hlsURL := edgeResp.URL
 			hlsURL = strings.ReplaceAll(hlsURL, "?fast_start=true&", "?")
 			hlsURL = strings.ReplaceAll(hlsURL, "&fast_start=true", "")
 			hlsURL = strings.ReplaceAll(hlsURL, "?fast_start=true", "")
 			
-			legacyStream := &Stream{
-				HLSSource:        hlsURL,
-				RoomTitle:        resp.RoomTitle,
-				Gender:           resp.Gender,
-				NumViewers:       resp.NumViewers,
-				SummaryCardImage: resp.SummaryCardImage,
-			}
-			return legacyStream, nil
+			return &Stream{
+				HLSSource: hlsURL,
+			}, nil
 		}
 		
-		fmt.Printf("[WARN] %s: Legacy API via FlareSolverr returned no HLS source (room_status=%s, code=%s)\n", 
-			username, resp.RoomStatus, resp.Code)
+		fmt.Printf("[WARN] %s: Edge API returned no URL (room_status=%s)\n", username, edgeResp.RoomStatus)
 		
 		return &Stream{}, internal.ErrChannelOffline
 	}
