@@ -92,99 +92,219 @@ type apiResponse struct {
 }
 
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
-	var legacyStream *Stream
-	var legacyErr error
-
-	// In CI mode (CycleTLS), skip the legacy API entirely.
-	// /api/chatvideocontext/ always returns "age-gate-required" because the
-	// AG_Key cookie is session-bound to FlareSolverr's Chrome browser and
-	// cannot be reused by CycleTLS. The HLS API doesn't need age verification.
-	// Ref: https://gist.github.com/mywalkb/1c9a26a59018cf1af40eb2fe0e8dea33
-	if os.Getenv("USE_FLARESOLVERR") != "true" {
-		fmt.Printf("[DEBUG] %s: Trying both API endpoints for better detection\n", username)
-		legacyStream, legacyErr = fetchStreamLegacy(ctx, client, username)
-		if legacyErr == nil && legacyStream != nil && legacyStream.HLSSource != "" {
-			fmt.Printf("[INFO] %s: Legacy API returned stream successfully\n", username)
-			return legacyStream, nil
-		}
-	} else {
-		fmt.Printf("[DEBUG] %s: CI mode - using HLS API directly (skipping age-gated legacy API)\n", username)
+	// In CI mode (FlareSolverr), use FlareSolverr's real Chrome browser to fetch
+	// the room page and parse initialRoomDossier. CycleTLS API calls don't work
+	// because Cloudflare detects TLS fingerprint mismatch with cf_clearance cookie
+	// and silently returns fake "offline" responses.
+	if os.Getenv("USE_FLARESOLVERR") == "true" {
+		fmt.Printf("[DEBUG] %s: CI mode - fetching room page via FlareSolverr\n", username)
+		return fetchStreamViaFlareSolverr(ctx, username)
 	}
-	
+
+	// Normal mode: try legacy API first, then HLS API fallback
+	fmt.Printf("[DEBUG] %s: Trying both API endpoints for better detection\n", username)
+	legacyStream, legacyErr := fetchStreamLegacy(ctx, client, username)
+	if legacyErr == nil && legacyStream != nil && legacyStream.HLSSource != "" {
+		fmt.Printf("[INFO] %s: Legacy API returned stream successfully\n", username)
+		return legacyStream, nil
+	}
+
 	// Try alternative HLS API endpoint
-	// Use the /get_edge_hls_url_ajax/ endpoint which works better with automated tools
-	// This endpoint doesn't require the same level of age verification as /api/chatvideocontext/
-	// Source: https://gist.github.com/mywalkb/1c9a26a59018cf1af40eb2fe0e8dea33
-	
 	apiURL := fmt.Sprintf("%sget_edge_hls_url_ajax/", server.Config.Domain)
 	roomReferer := fmt.Sprintf("%s%s/", server.Config.Domain, username)
-	fmt.Printf("[DEBUG] %s: Calling HLS API: %s (Referer: %s)\n", username, apiURL, roomReferer)
-	
-	// This endpoint requires POST with form data and a room-specific Referer
-	// Ref: https://gist.github.com/mywalkb/1c9a26a59018cf1af40eb2fe0e8dea33
 	postData := fmt.Sprintf("room_slug=%s&bandwidth=high", username)
-	
+
 	body, err := client.PostWithReferer(ctx, apiURL, postData, roomReferer)
 	if err != nil {
-		fmt.Printf("[ERROR] %s: HLS API call failed: %v\n", username, err)
-		// Return the legacy error if both failed
 		if legacyStream != nil {
 			return legacyStream, legacyErr
 		}
 		return nil, err
 	}
-	
-	fmt.Printf("[DEBUG] %s: HLS API response received (length: %d)\n", username, len(body))
 
-	// Parse response from HLS endpoint
 	var hlsResp struct {
 		RoomStatus string `json:"room_status"`
 		URL        string `json:"url"`
 		Success    bool   `json:"success"`
 	}
-	
+
 	if err := json.Unmarshal([]byte(body), &hlsResp); err != nil {
-		fmt.Printf("[ERROR] %s: Failed to parse HLS API response: %v\n", username, err)
-		// Return the legacy error if both failed
 		if legacyStream != nil {
 			return legacyStream, legacyErr
 		}
 		return nil, err
 	}
-	
-	fmt.Printf("[INFO] %s: HLS API Response - room_status=%q, url_present=%v, success=%v\n", 
+
+	fmt.Printf("[INFO] %s: HLS API Response - room_status=%q, url_present=%v, success=%v\n",
 		username, hlsResp.RoomStatus, hlsResp.URL != "", hlsResp.Success)
 
-	// If HLS API returned a stream URL, use it
 	if hlsResp.Success && hlsResp.URL != "" {
-		meta := &Stream{HLSSource: hlsResp.URL}
-		fmt.Printf("[INFO] %s: HLS API returned stream successfully\n", username)
-		return meta, nil
+		return &Stream{HLSSource: hlsResp.URL}, nil
 	}
 
-	// Both APIs failed - return the most specific error
 	meta := &Stream{}
 	if legacyStream != nil {
 		meta = legacyStream
 	}
-	
-	// Prioritize specific errors over generic offline
+
 	switch hlsResp.RoomStatus {
 	case "private":
 		return meta, internal.ErrPrivateStream
 	case "hidden":
 		return meta, internal.ErrHiddenStream
 	case "offline":
-		// If legacy API had a different error, return that instead
 		if legacyErr != nil && legacyErr != internal.ErrChannelOffline {
 			return meta, legacyErr
 		}
 		return meta, internal.ErrChannelOffline
 	default:
-		// If legacy API had an error, return that
 		if legacyErr != nil {
 			return meta, legacyErr
 		}
+		return meta, internal.ErrChannelOffline
+	}
+}
+
+// fetchStreamViaFlareSolverr uses FlareSolverr's real Chrome browser to visit
+// the room page and extract the HLS stream URL from initialRoomDossier.
+// This is the only reliable method from data center IPs because CycleTLS's TLS
+// fingerprint doesn't match the cf_clearance cookie, causing Cloudflare to return
+// fake responses. FlareSolverr's Chrome has a consistent session+fingerprint.
+func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, error) {
+	flare := internal.NewFlareSolverrClient()
+
+	roomURL := fmt.Sprintf("%s%s/", server.Config.Domain, username)
+
+	// Build cookies from server config
+	cookies := internal.ParseCookies(server.Config.Cookies)
+
+	// Headers for the request
+	headers := map[string]string{
+		"Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Accept-Language":  "en-US,en;q=0.5",
+		"X-Requested-With": "XMLHttpRequest",
+	}
+
+	// Fetch room page through FlareSolverr's real Chrome browser
+	fmt.Printf("[DEBUG] %s: Fetching room page via FlareSolverr: %s\n", username, roomURL)
+	htmlBody, _, _, err := flare.GetWithCookiesAndUA(ctx, roomURL, cookies, headers)
+	if err != nil {
+		return nil, fmt.Errorf("flaresolverr room fetch failed: %w", err)
+	}
+
+	fmt.Printf("[DEBUG] %s: Room page received (length: %d)\n", username, len(htmlBody))
+
+	// Check for Chaturbate's 404 page (cancelled/deleted broadcaster)
+	if strings.Contains(htmlBody, "HTTP 404") || strings.Contains(htmlBody, "cancelled broadcaster") || strings.Contains(htmlBody, "Page Not Found") {
+		fmt.Printf("[INFO] %s: Room page returned 404 (broadcaster may be cancelled or deleted)\n", username)
+		return &Stream{}, internal.ErrChannelOffline
+	}
+
+	// Parse initialRoomDossier from HTML
+	// Format: window.initialRoomDossier = "...escaped JSON..."
+	stream, err := parseInitialRoomDossier(htmlBody, username)
+	if err != nil {
+		// If we can't find initialRoomDossier, the channel is likely offline
+		// or the page structure has changed
+		fmt.Printf("[INFO] %s: Could not parse initialRoomDossier: %v\n", username, err)
+		return &Stream{}, internal.ErrChannelOffline
+	}
+
+	return stream, nil
+}
+
+// parseInitialRoomDossier extracts stream info from the initialRoomDossier
+// JSON embedded in the Chaturbate room page HTML.
+func parseInitialRoomDossier(html, username string) (*Stream, error) {
+	// Look for: window.initialRoomDossier = "...";
+	// The value is a JSON string that's been escaped (quotes, unicode)
+	const marker = "window.initialRoomDossier = \""
+
+	startIdx := strings.Index(html, marker)
+	if startIdx == -1 {
+		// Try alternate format without window prefix
+		const altMarker = "initialRoomDossier = \""
+		startIdx = strings.Index(html, altMarker)
+		if startIdx == -1 {
+			return nil, fmt.Errorf("initialRoomDossier not found in HTML")
+		}
+		startIdx += len(altMarker)
+	} else {
+		startIdx += len(marker)
+	}
+
+	// Find the closing quote - it's escaped JSON inside a string literal
+	// so we need to find an unescaped closing quote
+	endIdx := -1
+	for i := startIdx; i < len(html); i++ {
+		if html[i] == '"' && (i == 0 || html[i-1] != '\\') {
+			endIdx = i
+			break
+		}
+	}
+	if endIdx == -1 {
+		return nil, fmt.Errorf("could not find end of initialRoomDossier string")
+	}
+
+	// The content is a JSON string that was escaped for embedding in JS
+	// Unescape it: \" -> ", \/ -> /, \u0022 -> ", etc.
+	rawJSON := html[startIdx:endIdx]
+	// Replace escaped quotes
+	rawJSON = strings.ReplaceAll(rawJSON, "\\\"", "\"")
+	rawJSON = strings.ReplaceAll(rawJSON, "\\/", "/")
+	rawJSON = strings.ReplaceAll(rawJSON, "\\\\", "\\")
+	// Handle unicode escapes (\uXXXX) - Go's json.Unmarshal handles these natively
+
+	// Parse the JSON
+	var dossier struct {
+		HLSSource        string `json:"hls_source"`
+		RoomStatus       string `json:"room_status"`
+		RoomTitle        string `json:"room_title"`
+		BroadcasterGender string `json:"broadcaster_gender"`
+		NumViewers       int    `json:"num_viewers"`
+		SummaryCardImage string `json:"summary_card_image"`
+	}
+
+	if err := json.Unmarshal([]byte(rawJSON), &dossier); err != nil {
+		// Log first 500 chars of raw JSON for debugging
+		preview := rawJSON
+		if len(preview) > 500 {
+			preview = preview[:500] + "..."
+		}
+		fmt.Printf("[DEBUG] %s: Failed to parse dossier JSON: %v\n", username, err)
+		fmt.Printf("[DEBUG] %s: Raw JSON preview: %s\n", username, preview)
+		return nil, fmt.Errorf("parse initialRoomDossier JSON: %w", err)
+	}
+
+	fmt.Printf("[INFO] %s: Room dossier - room_status=%q, hls_source_present=%v, viewers=%d\n",
+		username, dossier.RoomStatus, dossier.HLSSource != "", dossier.NumViewers)
+
+	meta := &Stream{
+		RoomTitle:        dossier.RoomTitle,
+		Gender:           dossier.BroadcasterGender,
+		NumViewers:       dossier.NumViewers,
+		SummaryCardImage: dossier.SummaryCardImage,
+	}
+
+	if dossier.HLSSource != "" {
+		meta.HLSSource = dossier.HLSSource
+		fmt.Printf("[INFO] %s: ✅ Stream detected via FlareSolverr! HLS URL found\n", username)
+		return meta, nil
+	}
+
+	switch dossier.RoomStatus {
+	case "public":
+		// Room is public but no HLS source - age gate issue even with FlareSolverr
+		fmt.Printf("[WARN] %s: Room is PUBLIC but no HLS source in dossier\n", username)
+		return meta, internal.ErrAgeVerification
+	case "private":
+		return meta, internal.ErrPrivateStream
+	case "hidden":
+		return meta, internal.ErrHiddenStream
+	case "offline":
+		return meta, internal.ErrChannelOffline
+	default:
+		fmt.Printf("[INFO] %s: Unknown room_status=%q, treating as offline\n", username, dossier.RoomStatus)
 		return meta, internal.ErrChannelOffline
 	}
 }
