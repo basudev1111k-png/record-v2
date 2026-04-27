@@ -364,14 +364,12 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 	ch.Duration += duration
 	ch.segmentCount++
 	
-	// Periodic sync every 10 segments (~10 seconds) to minimize data loss
-	// on forced shutdown (e.g., GitHub Actions workflow cancellation)
-	if ch.segmentCount%10 == 0 {
+	// CRITICAL FIX: Sync every 5 segments (~5 seconds) instead of 10 to minimize corruption
+	// This ensures data is written to disk more frequently, reducing data loss on crashes
+	if ch.segmentCount%5 == 0 {
 		if err := ch.File.Sync(); err != nil && !errors.Is(err, os.ErrClosed) {
 			// Log but don't fail - sync is best-effort for crash protection
-			if server.Config.Debug {
-				ch.Error("periodic sync failed: %v", err)
-			}
+			ch.Error("periodic sync failed (segment %d): %v", ch.segmentCount, err)
 		}
 	}
 	

@@ -5,100 +5,94 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
+
   validate:
-    name: Validate Configuration
+    name: Validate & Build Matrix
     runs-on: ubuntu-latest
     outputs:
-      matrix_jobs: ${{ steps.generate_matrix.outputs.matrix_jobs }}
-      session_id: ${{ steps.generate_session.outputs.session_id }}
-      channels: ${{ steps.validate.outputs.resolved_channels }}
+      matrix_jobs: ${{ steps.matrix.outputs.matrix_jobs }}
+      session_id:  ${{ steps.session.outputs.session_id }}
+      channels:    ${{ steps.validate.outputs.channels }}
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate inputs
+      - name: Validate channels.txt
         id: validate
-        run: |
-          if [ ! -f ".github/workflows/channels.txt" ]; then
-            echo "❌ ERROR: .github/workflows/channels.txt not found"
-            echo ""
-            echo "To fix this:"
-            echo "1. Create the file: .github/workflows/channels.txt"
-            echo "2. Add one channel per line in format: site:username"
-            echo "3. Example:"
-            echo "   chaturbate:channel1"
-            echo "   stripchat:channel2"
-            echo ""
-            exit 1
-          fi
-
-          echo "Reading channels from .github/workflows/channels.txt..."
-          CHANNELS_LIST=$(grep -v '^[[:space:]]*#' .github/workflows/channels.txt | grep -v '^[[:space:]]*$' | tr -d '\r' | paste -sd "," -)
-
-          if [ -z "$CHANNELS_LIST" ]; then
-            echo "Error: No channels found in .github/workflows/channels.txt"
-            exit 1
-          fi
-
-          CHANNEL_COUNT=$(echo "$CHANNELS_LIST" | tr ',' '\n' | wc -l)
-
-          if [ "$CHANNEL_COUNT" -gt 20 ]; then
-            # FIX 9: notify via Discord when channels are silently truncated
-            echo "⚠️  WARNING: Found $CHANNEL_COUNT channels, limiting to 20 (GitHub Actions max)"
-            echo "   Channels 21–$CHANNEL_COUNT will NOT be recorded this run."
-            if [ -n "$DISCORD_WEBHOOK_URL" ]; then
-              curl -s -X POST "$DISCORD_WEBHOOK_URL" \
-                -H "Content-Type: application/json" \
-                -d "{\"content\":\"⚠️ GoondVR: $CHANNEL_COUNT channels found but only 20 can run. Channels 21–$CHANNEL_COUNT are skipped this run.\"}" || true
-            fi
-            MATRIX_COUNT=20
-          else
-            MATRIX_COUNT=$CHANNEL_COUNT
-          fi
-
-          echo "✅ Validation passed: $MATRIX_COUNT matrix jobs for $CHANNEL_COUNT channels"
-          echo "Channels: $CHANNELS_LIST"
-          echo "validated_matrix_count=$MATRIX_COUNT" >> $GITHUB_OUTPUT
-          echo "resolved_channels=$CHANNELS_LIST" >> $GITHUB_OUTPUT
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          FILE=".github/workflows/channels.txt"
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: channels.txt not found at $FILE"; exit 1
+          fi
+          if [ ! -r "$FILE" ]; then
+            echo "ERROR: channels.txt is not readable"; exit 1
+          fi
+          # Read channels, filter comments/empty lines, sanitize names
+          CHANNELS=$(grep -v '^[[:space:]]*#' "$FILE" | grep -v '^[[:space:]]*$' | tr -d '\r' | \
+            sed 's/[^a-zA-Z0-9_-]/_/g' | paste -sd "," -)
+          if [ -z "$CHANNELS" ]; then
+            echo "ERROR: No valid channels found in $FILE"
+            echo "channels=" >> "$GITHUB_OUTPUT"
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          COUNT=$(echo "$CHANNELS" | tr ',' '\n' | wc -l)
+          echo "Found $COUNT channel(s)"
+          if [ "$COUNT" -gt 20 ]; then
+            echo "WARNING: $COUNT channels found, only 20 run per cycle"
+            echo "Channels 21-$COUNT will be skipped this cycle"
+            if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+              MSG=$(jq -n --arg txt "GoondVR: $COUNT channels configured but only 20 fit this run. Channels 21-$COUNT skipped." '{content:$txt}')
+              curl -sf -X POST "$DISCORD_WEBHOOK_URL" -H "Content-Type: application/json" -d "$MSG" || true
+            fi
+          fi
+          echo "channels=$CHANNELS" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
       - name: Generate session ID
-        id: generate_session
+        id: session
         run: |
-          SESSION_ID="run-$(date +%Y%m%d-%H%M%S)-${{ github.run_id }}"
-          echo "session_id=$SESSION_ID" >> $GITHUB_OUTPUT
-          echo "Generated session ID: $SESSION_ID"
+          SESSION_ID="session-$(date -u +%Y%m%d-%H%M%S)-${{ github.run_id }}"
+          echo "session_id=$SESSION_ID" >> "$GITHUB_OUTPUT"
+          echo "Session: $SESSION_ID"
 
-      - name: Generate matrix configuration
-        id: generate_matrix
+      - name: Build matrix
+        id: matrix
         run: |
-          MATRIX_COUNT="${{ steps.validate.outputs.validated_matrix_count }}"
-          CHANNELS_LIST="${{ steps.validate.outputs.resolved_channels }}"
+          CHANNELS="${{ steps.validate.outputs.channels }}"
+          COUNT="${{ steps.validate.outputs.count }}"
+          if [ -z "$CHANNELS" ] || [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No channels to process"
+            echo "matrix_jobs=[]" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          MAX=$(( COUNT > 20 ? 20 : COUNT ))
+          MATRIX=$(echo "$CHANNELS" | tr ',' '\n' | head -n "$MAX" \
+            | jq -R -s -c 'split("\n") | map(select(length > 0)) | to_entries | map({id: (.key+1 | tostring), channel: .value})')
+          # Validate JSON output
+          if ! echo "$MATRIX" | jq empty 2>/dev/null; then
+            echo "ERROR: Failed to generate valid matrix JSON"
+            exit 1
+          fi
+          if [ "$(echo "$MATRIX" | jq 'length')" -eq 0 ]; then
+            echo "ERROR: Matrix is empty after processing"
+            exit 1
+          fi
+          echo "matrix_jobs=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Matrix ($MAX job(s)):"
+          echo "$MATRIX" | jq '.'
 
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Matrix Generation Debug:"
-          echo "  Matrix count: $MATRIX_COUNT"
-          echo "  Channels list: $CHANNELS_LIST"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-          MATRIX_JOBS=$(echo "$CHANNELS_LIST" | tr ',' '\n' | head -n $MATRIX_COUNT | jq -R -s -c 'split("\n") | map(select(length > 0)) | to_entries | map({"id": (.key + 1 | tostring), "channel": .value})')
-
-          echo "Generated matrix jobs JSON:"
-          echo "$MATRIX_JOBS" | jq '.'
-          echo ""
-          echo "Number of jobs in matrix: $(echo "$MATRIX_JOBS" | jq '. | length')"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-          echo "matrix_jobs=$MATRIX_JOBS" >> $GITHUB_OUTPUT
 
   record:
-    name: Record (${{ matrix.job.channel }})
+    name: "Record [${{ matrix.job.channel }}]"
     needs: validate
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 340
     strategy:
       matrix:
         job: ${{ fromJson(needs.validate.outputs.matrix_jobs) }}
@@ -115,944 +109,950 @@ jobs:
           HEADLESS: true
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Restore shared configuration cache
+      # Cache stores only ./state/ (a few KB of goondvr internal state).
+      # Video files are NEVER cached - they are uploaded inline and deleted.
+      # Using date-based keys to auto-expire old caches (GitHub keeps last 7 days).
+      - name: Restore state cache
+        id: restore_state
         uses: actions/cache/restore@v4
-        id: restore_shared_config
         continue-on-error: true
         env:
           ZSTD_CLEVEL: 19
         with:
-          path: |
-            ./conf
-          key: shared-config-${{ github.run_id }}-${{ matrix.job.id }}
+          path: ./state
+          key: channel-state-${{ matrix.job.channel }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            shared-config-
-
-      # FIX 3: corrected cache key structure so cross-run restore actually matches.
-      # Save key:    state-pending-upload-job-{id}-{run_id}   (unique per run)
-      # Restore key: state-pending-upload-job-{id}-            (prefix matches any run's save key)
-      - name: Restore job-specific state cache
-        uses: actions/cache/restore@v4
-        id: restore_job_state
-        continue-on-error: true
-        env:
-          ZSTD_CLEVEL: 19
-        with:
-          path: |
-            ./videos
-            ./state
-            ./partial
-          key: state-pending-upload-job-${{ matrix.job.id }}-${{ github.run_id }}-never-match
-          restore-keys: |
-            state-pending-upload-job-${{ matrix.job.id }}-
-
-      - name: Upload cached recordings from previous run
-        if: always()
-        env:
-          GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
-          FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
-          # FIX 7: removed SUPABASE_URL / SUPABASE_KEY — they were declared here
-          # but never referenced inside process_cached_recordings.sh
-        run: |
-          echo "📦 Checking for cached recordings from previous run..."
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Cache Restore Debug Info:"
-          echo "  Cache hit: ${{ steps.restore_job_state.outputs.cache-hit }}"
-          echo "  Cache matched key: ${{ steps.restore_job_state.outputs.cache-matched-key }}"
-          echo "  Current run ID: ${{ github.run_id }}"
-          echo "  Matrix job ID: ${{ matrix.job.id }}"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-
-          echo "📁 Checking ./videos directory..."
-          if [ -d "./videos" ]; then
-            echo "  Directory exists"
-            echo "  Total size: $(du -sh ./videos 2>/dev/null | cut -f1)"
-            echo "  File count: $(find ./videos -type f 2>/dev/null | wc -l)"
-            echo ""
-            echo "  Contents:"
-            ls -lah ./videos/ 2>/dev/null || echo "  (empty or no files)"
-          else
-            echo "  Directory does not exist"
-          fi
-          echo ""
-
-          if [ -d "./videos" ] && [ -n "$(find ./videos -type f \( -name '*.ts' -o -name '*.mp4' -o -name '*.mkv' \) 2>/dev/null)" ]; then
-            echo "✅ Found cached recordings to upload:"
-            find ./videos -type f \( -name '*.ts' -o -name '*.mp4' -o -name '*.mkv' \) -exec ls -lh {} \;
-            echo ""
-
-            if [ -z "$GOFILE_API_KEY" ]; then
-              echo "⚠️  WARNING: GOFILE_API_KEY not configured"
-              echo "   Recordings will be preserved but not uploaded"
-            else
-              echo "✅ Upload credentials found, uploading cached recordings..."
-              echo ""
-
-              # ─────────────────────────────────────────────────────────────
-              # FIX 1: All diagnostic echoes inside helper functions now write
-              # to stderr (>&2) so that only the return value ends up in the
-              # command-substitution result used by callers.
-              #
-              # FIX 2: ffmpeg calls now check ffmpeg's own exit code directly
-              # instead of relying on the exit code of a grep pipe, which was
-              # checking the wrong process.
-              # ─────────────────────────────────────────────────────────────
-              # FIX (YAML parse error): functions are now defined inline within the
-              # run: | block instead of via a heredoc at column 0.  A heredoc whose
-              # content starts at column 0 terminates the YAML block scalar early,
-              # causing GitHub Actions to reject the workflow file.
-
-              convert_to_mp4() {
-                local input_file="$1"
-                local output_file="${input_file%.ts}.mp4"
-                echo "  Converting .ts to .mp4..." >&2
-                if ! command -v ffmpeg &>/dev/null; then
-                  echo "  ffmpeg not found, uploading .ts as-is" >&2
-                  echo "$input_file"; return 0
-                fi
-                if ! ffmpeg -nostdin -y -i "$input_file" -c copy -movflags +faststart "$output_file" 2>/dev/null; then
-                  echo "  Conversion failed, uploading .ts as-is" >&2
-                  echo "$input_file"; return 0
-                fi
-                if [ -f "$output_file" ] && [ -s "$output_file" ]; then
-                  echo "  Converted to MP4: $(du -h "$output_file" | cut -f1)" >&2
-                  rm -f "$input_file"
-                  echo "$output_file"; return 0
-                else
-                  echo "  Output invalid, uploading .ts as-is" >&2
-                  rm -f "$output_file"
-                  echo "$input_file"; return 0
-                fi
-              }
-
-              fix_mp4_streaming() {
-                local input_file="$1"
-                local temp_file="${input_file%.mp4}_fixed.mp4"
-                echo "  Fixing MP4 moov atom..." >&2
-                if ! command -v ffmpeg &>/dev/null; then
-                  echo "  ffmpeg not found, uploading MP4 as-is" >&2
-                  echo "$input_file"; return 0
-                fi
-                if ! ffmpeg -nostdin -y -i "$input_file" -c copy -movflags +faststart "$temp_file" 2>/dev/null; then
-                  echo "  Fix failed, uploading original" >&2
-                  rm -f "$temp_file"
-                  echo "$input_file"; return 0
-                fi
-                if [ -f "$temp_file" ] && [ -s "$temp_file" ]; then
-                  echo "  Fixed MP4: $(du -h "$temp_file" | cut -f1)" >&2
-                  mv "$temp_file" "$input_file"
-                  echo "$input_file"; return 0
-                else
-                  echo "  Fixed file invalid, uploading original" >&2
-                  rm -f "$temp_file"
-                  echo "$input_file"; return 0
-                fi
-              }
-
-              upload_to_gofile() {
-                local file="$1" api_key="$2"
-                echo "  Uploading to Gofile..." >&2
-                local SERVER
-                SERVER=$(curl -s "https://api.gofile.io/servers" | jq -r '.data.servers[0].name' 2>/dev/null)
-                if [ -z "$SERVER" ] || [ "$SERVER" = "null" ]; then
-                  SERVER=$(curl -s "https://api.gofile.io/servers" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
-                fi
-                if [ -z "$SERVER" ]; then echo "  Failed to get Gofile server" >&2; return 1; fi
-                echo "  Using server: $SERVER" >&2
-                local RESPONSE DOWNLOAD_PAGE
-                RESPONSE=$(curl -s -F "file=@$file" -F "token=$api_key" "https://$SERVER.gofile.io/contents/uploadfile")
-                DOWNLOAD_PAGE=$(echo "$RESPONSE" | jq -r '.data.downloadPage' 2>/dev/null)
-                if [ -z "$DOWNLOAD_PAGE" ] || [ "$DOWNLOAD_PAGE" = "null" ]; then
-                  DOWNLOAD_PAGE=$(echo "$RESPONSE" | grep -o '"downloadPage":"[^"]*"' | cut -d'"' -f4)
-                fi
-                if [ -n "$DOWNLOAD_PAGE" ] && [ "$DOWNLOAD_PAGE" != "null" ]; then
-                  echo "  Gofile URL: $DOWNLOAD_PAGE" >&2
-                  echo "$DOWNLOAD_PAGE"; return 0
-                else
-                  echo "  Gofile upload failed. Response: $RESPONSE" >&2; return 1
-                fi
-              }
-
-              upload_to_filester() {
-                local file="$1" api_key="$2"
-                echo "  Uploading to Filester..." >&2
-                local RESPONSE HTTP_CODE
-                if [ -n "$api_key" ]; then
-                  RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
-                    -X POST "https://u1.filester.me/api/v1/upload" \
-                    -H "Authorization: Bearer $api_key" \
-                    -F "file=@$file")
-                else
-                  RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
-                    -X POST "https://u1.filester.me/api/v1/upload" \
-                    -F "file=@$file")
-                fi
-                HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-                RESPONSE=$(echo "$RESPONSE" | sed '/HTTP_CODE:/d')
-                echo "  HTTP Status: $HTTP_CODE" >&2
-                local SUCCESS SLUG
-                SUCCESS=$(echo "$RESPONSE" | jq -r '.success' 2>/dev/null)
-                SLUG=$(echo "$RESPONSE" | jq -r '.slug' 2>/dev/null)
-                if [ "$SUCCESS" = "true" ] && [ -n "$SLUG" ] && [ "$SLUG" != "null" ]; then
-                  local DOWNLOAD_URL="https://filester.me/d/$SLUG"
-                  echo "  Filester URL: $DOWNLOAD_URL" >&2
-                  echo "$DOWNLOAD_URL"; return 0
-                else
-                  local MSG; MSG=$(echo "$RESPONSE" | jq -r '.message' 2>/dev/null)
-                  echo "  Filester upload failed. Error: $MSG" >&2; return 1
-                fi
-              }
-
-              save_to_database() {
-                local filename="$1" gofile_url="$2" filester_url="$3" filesize="$4"
-                local CHANNEL TIMESTAMP DATE DB_FILE NEW_ENTRY TMP_FILE
-                CHANNEL=$(echo "$filename" | sed 's/_[0-9].*$//')
-                TIMESTAMP=$(echo "$filename" | sed 's/^.*_\([0-9-]*_[0-9-]*\)\..*$/\1/' | tr '_' ' ')
-                DATE=$(echo "$TIMESTAMP" | cut -d' ' -f1)
-                echo "  Saving to database: channel=$CHANNEL date=$DATE" >&2
-                mkdir -p "./database/$CHANNEL"
-                DB_FILE="./database/$CHANNEL/$DATE.json"
-                NEW_ENTRY=$(jq -n \
-                  --arg channel "$CHANNEL" \
-                  --arg timestamp "$TIMESTAMP" \
-                  --arg gofile_url "$gofile_url" \
-                  --arg filester_url "$filester_url" \
-                  --arg filesize "$filesize" \
-                  --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                  '{channel:$channel,timestamp:$timestamp,gofile_url:$gofile_url,filester_url:$filester_url,filesize:($filesize|tonumber),uploaded_at:$uploaded_at,source:"cached_recording"}')
-                if [ -f "$DB_FILE" ]; then
-                  TMP_FILE="${DB_FILE}.tmp"
-                  jq --argjson entry "$NEW_ENTRY" '. += [$entry]' "$DB_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$DB_FILE"
-                else
-                  echo "[$NEW_ENTRY]" | jq '.' > "$DB_FILE"
-                fi
-                echo "  DB entry added: $DB_FILE" >&2
-              }
-
-              UPLOADED_COUNT=0
-              FAILED_COUNT=0
-
-              while IFS= read -r video; do
-                [ -f "$video" ] || continue
-                ORIGINAL_FILENAME=$(basename "$video")
-                echo ""
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "Processing: $ORIGINAL_FILENAME ($(du -h "$video" | cut -f1))"
-                echo ""
-                local PROCESSED_VIDEO
-                if [[ "$video" == *.ts ]]; then
-                  PROCESSED_VIDEO=$(convert_to_mp4 "$video")
-                elif [[ "$video" == *.mp4 ]]; then
-                  PROCESSED_VIDEO=$(fix_mp4_streaming "$video")
-                else
-                  PROCESSED_VIDEO="$video"
-                fi
-                FILENAME=$(basename "$PROCESSED_VIDEO")
-                FILESIZE=$(stat -c%s "$PROCESSED_VIDEO" 2>/dev/null || echo "0")
-                echo ""
-                echo "  Starting dual upload (Gofile + Filester)..."
-                local GOFILE_URL="" FILESTER_URL="" GOFILE_SUCCESS=1 FILESTER_SUCCESS=1
-                if [ -n "$GOFILE_API_KEY" ]; then
-                  GOFILE_URL=$(upload_to_gofile "$PROCESSED_VIDEO" "$GOFILE_API_KEY")
-                  GOFILE_SUCCESS=$?
-                fi
-                if [ -n "$FILESTER_API_KEY" ]; then
-                  FILESTER_URL=$(upload_to_filester "$PROCESSED_VIDEO" "$FILESTER_API_KEY")
-                  FILESTER_SUCCESS=$?
-                fi
-                if [ $GOFILE_SUCCESS -eq 0 ] || [ $FILESTER_SUCCESS -eq 0 ]; then
-                  [ -z "$GOFILE_URL" ] && GOFILE_URL="(upload failed)"
-                  [ -z "$FILESTER_URL" ] && FILESTER_URL="(upload failed)"
-                  save_to_database "$FILENAME" "$GOFILE_URL" "$FILESTER_URL" "$FILESIZE"
-                  rm -f "$PROCESSED_VIDEO"
-                  echo "  Done"
-                  UPLOADED_COUNT=$((UPLOADED_COUNT + 1))
-                  if [ $GOFILE_SUCCESS -ne 0 ] || [ $FILESTER_SUCCESS -ne 0 ]; then
-                    echo "  Warning: only partial upload succeeded"
-                  fi
-                else
-                  echo "  Both uploads failed, keeping local file"
-                  FAILED_COUNT=$((FAILED_COUNT + 1))
-                fi
-              done < <(find ./videos -type f \( -name '*.ts' -o -name '*.mp4' -o -name '*.mkv' \) 2>/dev/null)
-
-              echo ""
-              echo "Summary: uploaded=$UPLOADED_COUNT failed=$FAILED_COUNT"
-
-              echo ""
-              echo "✅ Cached recordings processed"
-            fi
-          else
-            echo "ℹ️  No cached recordings found"
-          fi
-
-          echo ""
-          echo "📦 Cache processing complete - ready to start fresh recording"
-
-      - name: Commit database after cached uploads
-        if: always()
-        continue-on-error: true
-        run: |
-          echo "📦 Committing database after cached uploads..."
-
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-          if [ -d "./database" ] && [ "$(ls -A ./database 2>/dev/null)" ]; then
-            git add ./database/*/*.json 2>/dev/null || true
-
-            if git diff --staged --quiet; then
-              echo "ℹ️  No new database entries to commit"
-            else
-              COMMIT_MSG=$(printf "chore: update recording database (cached uploads) [skip ci]\n\nJob: %s\nChannel: %s\nRun ID: %s\nSession: %s\nSource: Cached recordings from previous run\nTimestamp: %s" \
-                "${{ matrix.job.id }}" "${{ matrix.job.channel }}" "${{ github.run_id }}" \
-                "${{ needs.validate.outputs.session_id }}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
-
-              git commit -m "$COMMIT_MSG"
-
-              MAX_RETRIES=3
-              RETRY_COUNT=0
-              while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-                # FIX 6: random jitter reduces simultaneous push collisions across 20 parallel jobs
-                sleep $((RANDOM % 10))
-                echo "Attempting to push (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)..."
-                if git push origin HEAD:main; then
-                  echo "✅ Database successfully pushed to repository"
-                  break
-                else
-                  RETRY_COUNT=$((RETRY_COUNT + 1))
-                  if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                    echo "⚠️  Push failed, retrying..."
-                    git pull --rebase origin main || true
-                  else
-                    echo "❌ Failed to push database after $MAX_RETRIES attempts"
-                  fi
-                fi
-              done
-            fi
-          else
-            echo "ℹ️  No database directory or files found"
-          fi
+            channel-state-${{ matrix.job.channel }}-
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.22'
           cache: true
 
-      - name: Install ffmpeg and lsof
-        # FIX 8: added lsof so the "prepare for cache" step can reliably check
-        # whether files are still open (lsof is not always present on ubuntu-latest)
+      - name: Install system tools
         run: |
-          echo "📦 Installing ffmpeg and lsof..."
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg lsof
-          ffmpeg -version
-          echo "✅ ffmpeg and lsof installed successfully"
+          sudo apt-get install -y ffmpeg lsof bc psmisc
+          ffmpeg -version | head -1
+          fuser --version 2>&1 | head -1 || echo "fuser installed"
 
-      - name: Install dependencies
+      - name: Install Go dependencies
+        run: go mod download
+
+      - name: Build goondvr
         run: |
-          go mod download
-          echo "Dependencies installed successfully"
+          go build -v -ldflags="-s -w" -o goondvr main.go
+          chmod +x goondvr
+          echo "Binary: $(du -sh goondvr | cut -f1)"
 
-      - name: Initialize state
+      - name: Initialise workspace
         env:
           CHATURBATE_COOKIES: ${{ secrets.CHATURBATE_COOKIES }}
+          GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
+          FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
         run: |
-          mkdir -p ./conf ./videos ./state ./partial ./database
-
+          mkdir -p ./conf ./videos ./state ./database
+          
+          # Validate at least one upload service is configured
+          if [ -z "$GOFILE_API_KEY" ] && [ -z "$FILESTER_API_KEY" ]; then
+            echo "ERROR: No upload service configured (GOFILE_API_KEY or FILESTER_API_KEY required)"
+            exit 1
+          fi
+          
           COOKIES="${CHATURBATE_COOKIES:-}"
-
-          if [ -n "$COOKIES" ] && [[ ! "$COOKIES" == *"cf_clearance="* ]]; then
-            echo "ℹ️  Auto-fixing: Adding cf_clearance= prefix to cookie value"
+          if [ -n "$COOKIES" ] && [[ "$COOKIES" != *"cf_clearance="* ]]; then
             COOKIES="cf_clearance=${COOKIES}"
           fi
-
           jq -n \
             --arg cookies "$COOKIES" \
             --arg ua "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
-            '{
-              "cookies": $cookies,
-              "user_agent": $ua,
-              "cf_channel_threshold": 5,
-              "cf_global_threshold": 3,
-              "notify_cooldown_hours": 4,
-              "disk_warning_percent": 80,
-              "disk_critical_percent": 90
-            }' > ./conf/settings.json
-
+            '{cookies:$cookies,user_agent:$ua,cf_channel_threshold:5,cf_global_threshold:3,
+              notify_cooldown_hours:4,disk_warning_percent:80,disk_critical_percent:90}' \
+            > ./conf/settings.json
+          if ! jq empty ./conf/settings.json 2>/dev/null; then
+            echo "ERROR: settings.json invalid JSON"
+            exit 1
+          fi
           if [ -z "$COOKIES" ]; then
-            echo "❌ ERROR: CHATURBATE_COOKIES secret not configured"
-            echo ""
-            echo "To fix this:"
-            echo "1. Go to https://github.com/${{ github.repository }}/settings/secrets/actions"
-            echo "2. Add a new secret named: CHATURBATE_COOKIES"
-            echo "3. Value should be: cf_clearance=YOUR_VALUE"
-            echo ""
-            echo "⚠️  Workflow will continue but Cloudflare WILL block all requests"
+            echo "WARNING: CHATURBATE_COOKIES not set"
           else
-            echo "✅ Configured Chaturbate cookies from GitHub Secrets"
-            echo "   Cookie preview: ${COOKIES:0:50}..."
-
-            if [[ "$COOKIES" == *"cf_clearance="* ]]; then
-              echo "✅ Cookie contains cf_clearance (Cloudflare bypass)"
-            else
-              echo "⚠️  WARNING: Cookie does not contain cf_clearance"
-            fi
-
-            if [[ "$COOKIES" == *"PASTE"* ]] || [[ "$COOKIES" == *"YOUR_"* ]]; then
-              echo "❌ ERROR: Cookies appear to be placeholder text"
-            fi
-
-            if jq empty ./conf/settings.json 2>/dev/null; then
-              echo "✅ settings.json created successfully"
-              WRITTEN_COOKIES=$(jq -r '.cookies' ./conf/settings.json)
-              if [ "$WRITTEN_COOKIES" = "$COOKIES" ]; then
-                echo "✅ Cookies verified in settings.json"
-              else
-                echo "❌ ERROR: Cookies mismatch in settings.json"
-                exit 1
-              fi
-            else
-              echo "❌ ERROR: settings.json contains invalid JSON"
-              cat ./conf/settings.json
-              exit 1
-            fi
+            echo "Cookies configured"
           fi
 
-          echo "Shared config cache hit: ${{ steps.restore_shared_config.outputs.cache-hit }}"
-          echo "Job state cache hit: ${{ steps.restore_job_state.outputs.cache-hit }}"
-
-      - name: Build application
-        run: |
-          echo "🔨 Building GoondVR binary..."
-          go build -v -o goondvr main.go
-          chmod +x goondvr
-          echo "✅ Build complete"
-          ls -lah goondvr
-          file goondvr
-          ./goondvr --help || echo "Help command failed, but binary exists"
-
-      - name: Wait for FlareSolverr to be ready
+      - name: Wait for FlareSolverr
         timeout-minutes: 2
         run: |
-          echo "⏳ Waiting for FlareSolverr service to be ready..."
-
-          MAX_ATTEMPTS=24
-          ATTEMPT=0
-
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS..."
-
-            if curl -s -f http://localhost:8191/health > /dev/null 2>&1; then
-              echo "✅ FlareSolverr is ready!"
-              curl -s http://localhost:8191/health | jq '.' || true
-              exit 0
+          READY=0
+          for i in $(seq 1 24); do
+            if curl -sf http://localhost:8191/health >/dev/null 2>&1; then
+              echo "FlareSolverr ready (attempt $i)"
+              curl -s http://localhost:8191/health | jq -r '"Version: " + (.version // "unknown")'
+              READY=1
+              break
             fi
-
-            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
-              echo "⏳ FlareSolverr not ready yet, waiting 5 seconds..."
-              sleep 5
-            fi
+            echo "Waiting... ($i/24)"; sleep 5
           done
+          if [ "$READY" -eq 0 ]; then
+            echo "ERROR: FlareSolverr failed to start after 2 minutes"
+            echo "This will likely cause Cloudflare bypass failures"
+            exit 1
+          fi
 
-          echo "❌ ERROR: FlareSolverr failed to start within 2 minutes"
-          docker logs $(docker ps -q --filter "ancestor=ghcr.io/flaresolverr/flaresolverr:latest") || true
-          echo "⚠️  WARNING: Workflow will continue but Cloudflare bypass may not work"
-          exit 0
-
-      - name: Start recording
+      - name: Record with inline upload
+        id: record
         env:
-          GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
-          FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOFILE_API_KEY:      ${{ secrets.GOFILE_API_KEY }}
+          FILESTER_API_KEY:    ${{ secrets.FILESTER_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
-          MATRIX_JOB_ID: ${{ matrix.job.id }}
-          MATRIX_JOB_COUNT: ${{ steps.validate.outputs.validated_matrix_count }}
-          SESSION_ID: ${{ needs.validate.outputs.session_id }}
-          CHANNELS: ${{ needs.validate.outputs.channels }}
-          COST_SAVING: false
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
-          USE_FLARESOLVERR: true
-          FLARESOLVERR_URL: http://localhost:8191/v1
+          NTFY_TOKEN:          ${{ secrets.NTFY_TOKEN }}
+          GITHUB_TOKEN:        ${{ secrets.GITHUB_TOKEN }}
+          MATRIX_JOB_ID:       ${{ matrix.job.id }}
+          SESSION_ID:          ${{ needs.validate.outputs.session_id }}
+          CHANNELS:            ${{ needs.validate.outputs.channels }}
+          GITHUB_REPOSITORY:   ${{ github.repository }}
+          GITHUB_RUN_ID:       ${{ github.run_id }}
+          HTTPS_PROXY:         ${{ secrets.HTTPS_PROXY }}
+          USE_FLARESOLVERR:    "true"
+          FLARESOLVERR_URL:    "http://localhost:8191/v1"
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:        ${{ secrets.SUPABASE_KEY }}
         run: |
-          echo "🚀 Starting GoondVR in GitHub Actions mode"
-          echo "Session ID: $SESSION_ID"
-          echo "Matrix Job ID: $MATRIX_JOB_ID"
-          echo "Channels: $CHANNELS"
-          echo ""
+          # All diagnostic output uses >&2 inside helpers so command substitution
+          # callers only capture the return value on stdout.
 
-          if [ -n "$HTTPS_PROXY" ]; then
-            echo "✅ Using proxy: ${HTTPS_PROXY:0:30}..."
-          fi
-
-          ls -lah ./goondvr || echo "Binary not found!"
-
-          ./goondvr \
-            --mode github-actions \
-            --matrix-job-id $MATRIX_JOB_ID \
-            --session-id $SESSION_ID \
-            --channels "$CHANNELS" \
-            --interval 1 || {
-              EXIT_CODE=$?
-              echo "❌ ERROR: goondvr exited with code $EXIT_CODE"
-              ls -la ./
-              exit $EXIT_CODE
-            }
-
-      - name: Emergency processing on cancellation or timeout
-        if: cancelled() || failure()
-        timeout-minutes: 5
-        env:
-          GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
-          FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
-        run: |
-          if [ "${{ job.status }}" = "cancelled" ]; then
-            REASON="WORKFLOW CANCELLED"
-            SOURCE="cancelled"
-          else
-            REASON="WORKFLOW TIMEOUT (5.5 hours reached)"
-            SOURCE="timeout"
-          fi
-
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "🛑 $REASON - Processing recordings"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-
-          echo "Step 1/5: Stopping recording process..."
-          if pgrep -x "goondvr" > /dev/null; then
-            pkill -TERM goondvr 2>/dev/null || true
-            sleep 3
-            pkill -9 goondvr 2>/dev/null || true
-            echo "  ✅ Recording stopped"
-          else
-            echo "  ℹ️  No recording process running"
-          fi
-
-          echo "  ⏳ Waiting for files to stabilize..."
-          sleep 3
-
-          echo ""
-          echo "Step 2/5: Converting TS files to MP4..."
-          CONVERTED=0
-          SKIPPED=0
-
-          if [ -d "./videos" ]; then
-            # FIX 5: use find to avoid needing globstar for recursive **/*.ts glob
-            while IFS= read -r ts_file; do
-              [ -f "$ts_file" ] || continue
-
-              echo "  Checking: $(basename "$ts_file")"
-              prev_size=$(stat -c%s "$ts_file" 2>/dev/null || echo "0")
-              sleep 1
-              curr_size=$(stat -c%s "$ts_file" 2>/dev/null || echo "0")
-
-              if [ "$prev_size" != "$curr_size" ]; then
-                echo "    ⚠️  File still changing, waiting..."
-                sleep 3
+          # Retry wrapper for upload functions
+          retry_upload() {
+            local func="$1" file="$2" max_attempts=3 attempt=1 result
+            while [ $attempt -le $max_attempts ]; do
+              if result=$($func "$file" 2>&1); then
+                echo "$result"
+                return 0
               fi
+              echo "Attempt $attempt/$max_attempts failed: $result" >&2
+              [ $attempt -lt $max_attempts ] && sleep $((attempt * 2))
+              attempt=$((attempt + 1))
+            done
+            return 1
+          }
 
-              mp4_file="${ts_file%.ts}.mp4"
-              echo "  Converting: $(basename "$ts_file")"
+          gofile_upload() {
+            local f="$1" SRV RESP URL
+            SRV=$(curl -sf --max-time 10 "https://api.gofile.io/servers" | jq -r '.data.servers[0].name // empty' 2>/dev/null)
+            if [ -z "$SRV" ]; then
+              echo "no server available" >&2
+              return 1
+            fi
+            RESP=$(curl -sf --max-time 300 -F "file=@$f" -F "token=$GOFILE_API_KEY" "https://${SRV}.gofile.io/contents/uploadfile" 2>/dev/null)
+            if ! echo "$RESP" | jq empty 2>/dev/null; then
+              echo "invalid JSON response" >&2
+              return 1
+            fi
+            URL=$(echo "$RESP" | jq -r '.data.downloadPage // empty' 2>/dev/null)
+            if [ -n "$URL" ]; then
+              echo "$URL"
+            else
+              echo "no download URL in response" >&2
+              return 1
+            fi
+          }
 
-              # FIX 2: check ffmpeg exit code directly instead of via a grep pipe
-              if ffmpeg -nostdin -y -i "$ts_file" -c copy -movflags +faststart "$mp4_file" 2>/dev/null; then
-                if [ -f "$mp4_file" ] && [ -s "$mp4_file" ]; then
-                  # Validate MP4 integrity
-                  if ffmpeg -v error -i "$mp4_file" -f null - 2>&1 | grep -qi "error"; then
-                    echo "    ❌ MP4 validation failed, keeping TS file"
-                    rm -f "$mp4_file"
-                    SKIPPED=$((SKIPPED + 1))
-                  else
-                    echo "    ✅ Converted and validated"
-                    rm -f "$ts_file"
-                    CONVERTED=$((CONVERTED + 1))
-                  fi
+          filester_upload() {
+            local f="$1" RESP CODE SLUG
+            RESP=$(curl -sf --max-time 300 -w "\n__CODE__%{http_code}" \
+              -X POST "https://u1.filester.me/api/v1/upload" \
+              $([ -n "$FILESTER_API_KEY" ] && echo "-H" && echo "Authorization: Bearer $FILESTER_API_KEY") \
+              -F "file=@$f" 2>/dev/null || echo "__CODE__000")
+            CODE=$(echo "$RESP" | grep "__CODE__" | grep -o '[0-9]*$')
+            RESP=$(echo "$RESP" | grep -v "__CODE__")
+            if [ "$CODE" = "429" ]; then
+              echo "rate limited" >&2
+              return 1
+            fi
+            if ! echo "$RESP" | jq empty 2>/dev/null; then
+              echo "invalid JSON response (HTTP $CODE)" >&2
+              return 1
+            fi
+            SLUG=$(echo "$RESP" | jq -r 'if .success then .slug else empty end' 2>/dev/null)
+            if [ -n "$SLUG" ]; then
+              echo "https://filester.me/d/$SLUG"
+            else
+              echo "no slug in response (HTTP $CODE)" >&2
+              return 1
+            fi
+          }
+
+          ts_to_mp4() {
+            local src="$1" dst="${1%.ts}.mp4" tmp="${1%.ts}_conv.mp4"
+            # Use temp file to avoid partial writes
+            # CRITICAL FIX: Add verbose error logging and validate output file
+            if ffmpeg -nostdin -y -i "$src" -c copy -movflags +faststart "$tmp" 2>&1 | tee /tmp/ffmpeg_convert.log >&2; then
+              if [ -s "$tmp" ]; then
+                # Validate MP4 structure with ffprobe
+                if ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$tmp" >/dev/null 2>&1; then
+                  mv "$tmp" "$dst"
+                  rm -f "$src"
+                  echo "$dst"
                 else
-                  echo "    ❌ Output file invalid, keeping TS"
-                  rm -f "$mp4_file"
-                  SKIPPED=$((SKIPPED + 1))
+                  echo "ERROR: MP4 validation failed, file may be corrupted" >&2
+                  cat /tmp/ffmpeg_convert.log >&2
+                  rm -f "$tmp" "$dst"
+                  echo "$src"
                 fi
               else
-                echo "    ❌ Conversion failed, keeping TS"
-                SKIPPED=$((SKIPPED + 1))
+                echo "ERROR: Output file is empty" >&2
+                rm -f "$tmp" "$dst"
+                echo "$src"
               fi
-            done < <(find ./videos -type f -name '*.ts' 2>/dev/null)
-          fi
-          echo "  ✅ Converted: $CONVERTED, Skipped: $SKIPPED"
+            else
+              echo "ERROR: ffmpeg conversion failed" >&2
+              cat /tmp/ffmpeg_convert.log >&2
+              rm -f "$tmp" "$dst"
+              echo "$src"
+            fi
+          }
 
-          echo ""
-          echo "Step 3/5: Uploading to Gofile and Filester..."
-          UPLOADED=0
-          FAILED=0
-          SKIPPED_SIZE=0
+          fix_faststart() {
+            local src="$1" tmp="${1%.mp4}_fs.mp4"
+            # CRITICAL FIX: Validate input file first before attempting conversion
+            if ! ffprobe -v error "$src" >/dev/null 2>&1; then
+              echo "WARNING: Input MP4 is corrupted or incomplete, skipping faststart fix" >&2
+              echo "$src"
+              return
+            fi
+            if ffmpeg -nostdin -y -i "$src" -c copy -movflags +faststart "$tmp" 2>&1 | tee /tmp/ffmpeg_faststart.log >&2; then
+              if [ -s "$tmp" ]; then
+                # Validate output before replacing original
+                if ffprobe -v error "$tmp" >/dev/null 2>&1; then
+                  mv "$tmp" "$src"
+                else
+                  echo "WARNING: Faststart output validation failed, keeping original" >&2
+                  rm -f "$tmp"
+                fi
+              else
+                rm -f "$tmp"
+              fi
+            else
+              echo "WARNING: Faststart conversion failed, keeping original" >&2
+              cat /tmp/ffmpeg_faststart.log >&2
+              rm -f "$tmp"
+            fi
+            echo "$src"
+          }
 
-          if [ -d "./videos" ]; then
-            # FIX 5: use find+while to avoid word-splitting on filenames with spaces
-            while IFS= read -r video; do
-              [ -f "$video" ] || continue
+          supabase_insert() {
+            local ch="$1" ts="$2" gf="$3" fl="$4" sz="$5" src="$6"
+            
+            # Skip if Supabase not configured
+            if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+              return 0
+            fi
+            
+            # Convert timestamp to ISO 8601 format for Supabase
+            local ts_iso
+            ts_iso=$(date -d "$ts" -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+            
+            # Extract date from timestamp
+            local date_only
+            date_only=$(echo "$ts" | cut -d' ' -f1)
+            
+            # Build JSON payload
+            local payload
+            payload=$(jq -n \
+              --arg site "chaturbate" \
+              --arg ch "$ch" \
+              --arg ts "$ts_iso" \
+              --arg date "$date_only" \
+              --arg dur "0" \
+              --arg sz "$sz" \
+              --arg qual "unknown" \
+              --arg gf "${gf:-(not uploaded)}" \
+              --arg fl "${fl:-(not uploaded)}" \
+              --arg sess "$SESSION_ID" \
+              --arg job "$MATRIX_JOB_ID" \
+              '{
+                site: $site,
+                channel: $ch,
+                timestamp: $ts,
+                date: $date,
+                duration_seconds: ($dur|tonumber),
+                file_size_bytes: ($sz|tonumber),
+                quality: $qual,
+                gofile_url: $gf,
+                filester_url: $fl,
+                session_id: $sess,
+                matrix_job: $job
+              }')
+            
+            # Insert into Supabase
+            local resp http_code
+            resp=$(curl -sf --max-time 10 -w "\n__CODE__%{http_code}" \
+              -X POST "${SUPABASE_URL}/rest/v1/recordings" \
+              -H "apikey: ${SUPABASE_KEY}" \
+              -H "Authorization: Bearer ${SUPABASE_KEY}" \
+              -H "Content-Type: application/json" \
+              -H "Prefer: return=minimal" \
+              -d "$payload" 2>/dev/null || echo "__CODE__000")
+            
+            http_code=$(echo "$resp" | grep "__CODE__" | grep -o '[0-9]*$')
+            
+            if [ "$http_code" = "201" ] || [ "$http_code" = "200" ]; then
+              echo "  Supabase: inserted" >&2
+              return 0
+            else
+              echo "  Supabase: failed (HTTP $http_code)" >&2
+              return 1
+            fi
+          }
 
-              FILENAME=$(basename "$video")
-              FILESIZE=$(stat -c%s "$video" 2>/dev/null || echo "0")
-              FILESIZE_GB=$(echo "scale=2; $FILESIZE / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+          db_write() {
+            local f="$1" gf="$2" fl="$3" sz="$4" src="$5"
+            local fname ch date ts db_file entry tmp
+            fname=$(basename "$f")
+            # Extract channel: everything before the first timestamp pattern
+            ch=$(echo "$fname" | sed -E 's/_[0-9]{4}-[0-9]{2}-[0-9]{2}.*$//')
+            # Fallback: if no timestamp found, try removing _digits pattern (but keep underscores in channel name)
+            [ "$ch" = "$fname" ] && ch=$(echo "$fname" | sed -E 's/_[0-9]+\.[^.]*$//')
+            date=$(echo "$fname" | grep -oP '\d{4}-\d{2}-\d{2}' | head -1 || date -u +%Y-%m-%d)
+            ts=$(echo "$fname" | grep -oP '\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}' | head -1 | tr '_' ' ' || date -u +"%Y-%m-%d %H:%M:%S")
+            [ -z "$ch" ] || [ "$ch" = "$fname" ] && ch="unknown"
+            mkdir -p "./database/$ch"
+            db_file="./database/$ch/$date.json"
+            # Add unique ID to prevent deduplication issues
+            local unique_id="${ts}-$(date +%s%N | md5sum | cut -c1-8)"
+            entry=$(jq -n \
+              --arg id "$unique_id" --arg ch "$ch" --arg ts "$ts" \
+              --arg gf "${gf:-(not uploaded)}" --arg fl "${fl:-(not uploaded)}" \
+              --arg sz "$sz" --arg src "$src" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{id:$id,channel:$ch,timestamp:$ts,gofile_url:$gf,filester_url:$fl,filesize:($sz|tonumber),uploaded_at:$at,source:$src}')
+            if ! echo "$entry" | jq empty 2>/dev/null; then
+              echo "  ERROR: Failed to create valid JSON entry" >&2
+              return 1
+            fi
+            if [ -f "$db_file" ]; then
+              tmp="${db_file}.tmp"
+              if ! jq --argjson e "$entry" '. += [$e]' "$db_file" > "$tmp" 2>/dev/null; then
+                echo "  ERROR: Failed to merge JSON" >&2
+                rm -f "$tmp"
+                return 1
+              fi
+              mv "$tmp" "$db_file"
+            else
+              printf '[%s]\n' "$entry" | jq '.' > "$db_file"
+            fi
+            echo "  DB <- $db_file" >&2
+            
+            # Also insert into Supabase
+            supabase_insert "$ch" "$ts" "$gf" "$fl" "$sz" "$src" || true
+          }
 
-              if [ "$FILESIZE" -gt 10737418240 ]; then
-                echo "  ⏭️  $FILENAME (${FILESIZE_GB}GB - too large, saving to cache)"
-                SKIPPED_SIZE=$((SKIPPED_SIZE + 1))
+          upload_file() {
+            local f="$1" label="${2:-recording}"
+            [ -f "$f" ] || return 0
+            local fname sz upload_f gf="" fl="" any_ok=0
+            fname=$(basename "$f")
+            sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
+            
+            # CRITICAL FIX: Validate file size before processing
+            if [ "$sz" -lt 1048576 ]; then
+              echo "WARNING: File too small ($sz bytes), likely corrupted - skipping: $fname" >&2
+              rm -f "$f"
+              return 1
+            fi
+            
+            echo "Uploading: $fname (${sz} bytes)" >&2
+            upload_f="$f"
+            if   [[ "$f" == *.ts  ]]; then upload_f=$(ts_to_mp4 "$f")
+            elif [[ "$f" == *.mp4 ]]; then upload_f=$(fix_faststart "$f")
+            fi
+            # Verify file still exists after conversion
+            if [ ! -f "$upload_f" ]; then
+              echo "  ERROR: File disappeared after conversion" >&2
+              return 1
+            fi
+            # CRITICAL FIX: Validate file after conversion
+            local new_sz
+            new_sz=$(stat -c%s "$upload_f" 2>/dev/null || echo 0)
+            if [ "$new_sz" -lt 1048576 ]; then
+              echo "  ERROR: Converted file too small ($new_sz bytes), likely corrupted" >&2
+              rm -f "$upload_f"
+              return 1
+            fi
+            if [ -n "$GOFILE_API_KEY" ]; then
+              if gf=$(retry_upload gofile_upload "$upload_f"); then
+                echo "  Gofile: $gf" >&2
+                any_ok=1
+              else
+                echo "  Gofile failed after retries" >&2
+              fi
+            fi
+            if [ -n "$FILESTER_API_KEY" ]; then
+              if fl=$(retry_upload filester_upload "$upload_f"); then
+                echo "  Filester: $fl" >&2
+                any_ok=1
+              else
+                echo "  Filester failed after retries" >&2
+              fi
+            fi
+            if [ "$any_ok" -eq 1 ]; then
+              db_write "$upload_f" "$gf" "$fl" "$(stat -c%s "$upload_f" 2>/dev/null || echo 0)" "$label"
+              rm -f "$upload_f"
+              echo "  deleted local copy" >&2
+              return 0
+            else
+              echo "  all uploads failed - keeping file" >&2
+              return 1
+            fi
+          }
+
+          # Background uploader: runs every 30 s (reduced from 60s for faster uploads).
+          # Uploads files that are (a) not held open by lsof and (b) size-stable for 10 s (reduced from 15s).
+          # Also monitors disk usage: warns at 60%, kills goondvr at 75% (more aggressive).
+          bg_uploader() {
+            local upload_queue=()
+            while true; do
+              sleep 30
+              # Check disk first - AGGRESSIVE thresholds to prevent disk full
+              local pct
+              pct=$(df . --output=pcent 2>/dev/null | tail -1 | tr -dc '0-9' || df -h . | tail -1 | awk '{print $5}' | tr -dc '0-9')
+              if [ -z "$pct" ]; then
+                echo "WARNING: Cannot determine disk usage" >&2
+                pct=0
+              fi
+              if [ "${pct:-0}" -ge 75 ]; then
+                echo "DISK CRITICAL (${pct}%) - stopping goondvr immediately" >&2
+                pkill -TERM goondvr 2>/dev/null || true
+                sleep 2
+                pkill -9 goondvr 2>/dev/null || true
+                pkill -9 ffmpeg 2>/dev/null || true
+              elif [ "${pct:-0}" -ge 60 ]; then
+                echo "DISK WARNING (${pct}%) - uploading aggressively" >&2
+              elif [ "${pct:-0}" -ge 50 ]; then
+                echo "DISK NOTICE (${pct}%)" >&2
+              fi
+              
+              # Process up to 5 files per cycle (increased from 3 for faster clearing)
+              local processed=0
+              while IFS= read -r f && [ $processed -lt 5 ]; do
+                [ -f "$f" ] || continue
+                
+                # CRITICAL FIX: Check file size first - skip files that are too small
+                local fsize
+                fsize=$(stat -c%s "$f" 2>/dev/null || echo 0)
+                if [ "$fsize" -lt 1048576 ]; then
+                  echo "Skipping small file (likely incomplete): $(basename "$f") ($fsize bytes)" >&2
+                  continue
+                fi
+                
+                # Double-check with fuser as backup to lsof
+                if lsof "$f" 2>/dev/null | grep -q . || fuser "$f" 2>/dev/null | grep -q .; then
+                  continue
+                fi
+                local s1 s2
+                s1=$(stat -c%s "$f" 2>/dev/null || echo 0)
+                sleep 10
+                [ -f "$f" ] || continue
+                s2=$(stat -c%s "$f" 2>/dev/null || echo 0)
+                [ "$s1" = "$s2" ] || continue
+                # Triple-check not open after stability wait
+                if lsof "$f" 2>/dev/null | grep -q . || fuser "$f" 2>/dev/null | grep -q .; then
+                  continue
+                fi
+                
+                # CRITICAL FIX: Validate MP4 files before upload
+                if [[ "$f" == *.mp4 ]]; then
+                  if ! ffprobe -v error "$f" >/dev/null 2>&1; then
+                    echo "Skipping corrupted MP4: $(basename "$f")" >&2
+                    rm -f "$f"
+                    continue
+                  fi
+                fi
+                
+                upload_file "$f" "background" &
+                processed=$((processed + 1))
+              done < <(find ./videos -type f \( -name '*.ts' -o -name '*.mp4' -o -name '*.mkv' \) 2>/dev/null | head -20)
+              
+              # Wait for background uploads to complete
+              wait
+            done
+          }
+
+          # Stop goondvr at 5h 15m, leaving 25 min for cleanup before the 5h 40m hard timeout.
+          MAX_RECORD_SECS=18900
+
+          echo "=========================================="
+          echo "Starting recording"
+          echo "  Channel : ${{ matrix.job.channel }} (job ${{ matrix.job.id }})"
+          echo "  Session : $SESSION_ID"
+          echo "  Max time: $((MAX_RECORD_SECS/3600))h $((MAX_RECORD_SECS%3600/60))m"
+          echo "=========================================="
+
+          bg_uploader &
+          BG_PID=$!
+
+          GOONDVR_EXIT=0
+          timeout --signal=TERM ${MAX_RECORD_SECS}s ./goondvr \
+            --mode          github-actions \
+            --matrix-job-id "$MATRIX_JOB_ID" \
+            --session-id    "$SESSION_ID" \
+            --channels      "$CHANNELS" \
+            --quality       best \
+            --interval      1 \
+            || GOONDVR_EXIT=$?
+
+          echo "goondvr stopped (exit $GOONDVR_EXIT)"
+          
+          # Give bg_uploader time to finish current upload
+          echo "Waiting for background uploader to finish..."
+          sleep 5
+          kill "$BG_PID" 2>/dev/null || true
+          wait "$BG_PID" 2>/dev/null || true
+
+          echo "Running final upload sweep..."
+          FINAL_OK=0; FINAL_FAIL=0
+          while IFS= read -r f; do
+            if upload_file "$f" "final_sweep"; then FINAL_OK=$((FINAL_OK+1)); else FINAL_FAIL=$((FINAL_FAIL+1)); fi
+          done < <(find ./videos -type f \( -name '*.ts' -o -name '*.mp4' -o -name '*.mkv' \) 2>/dev/null)
+
+          echo "=========================================="
+          echo "Recording step complete"
+          echo "  Final sweep : $FINAL_OK uploaded, $FINAL_FAIL failed"
+          echo "  DB entries  : $(find ./database -name '*.json' 2>/dev/null | wc -l)"
+          echo "  Local files : $(find ./videos -type f 2>/dev/null | wc -l) remaining"
+          echo "=========================================="
+
+      - name: Emergency upload
+        if: cancelled() || failure()
+        timeout-minutes: 15
+        env:
+          GOFILE_API_KEY:   ${{ secrets.GOFILE_API_KEY }}
+          FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          SESSION_ID:       ${{ needs.validate.outputs.session_id }}
+          MATRIX_JOB_ID:    ${{ matrix.job.id }}
+        run: |
+          echo "Emergency upload (status: ${{ job.status }})"
+          pkill -TERM goondvr 2>/dev/null || true; sleep 5
+          pkill -9 goondvr 2>/dev/null || true
+          pkill -9 ffmpeg 2>/dev/null || true
+          sleep 2
+
+          # Retry wrapper for upload functions
+          retry_upload() {
+            local func="$1" file="$2" max_attempts=3 attempt=1 result
+            while [ $attempt -le $max_attempts ]; do
+              if result=$($func "$file" 2>&1); then
+                echo "$result"
+                return 0
+              fi
+              echo "Attempt $attempt/$max_attempts failed: $result" >&2
+              [ $attempt -lt $max_attempts ] && sleep $((attempt * 2))
+              attempt=$((attempt + 1))
+            done
+            return 1
+          }
+
+          gofile_upload() {
+            local f="$1" SRV RESP URL
+            SRV=$(curl -sf --max-time 10 "https://api.gofile.io/servers" | jq -r '.data.servers[0].name // empty' 2>/dev/null)
+            [ -z "$SRV" ] && return 1
+            RESP=$(curl -sf --max-time 300 -F "file=@$f" -F "token=$GOFILE_API_KEY" "https://${SRV}.gofile.io/contents/uploadfile" 2>/dev/null)
+            if ! echo "$RESP" | jq empty 2>/dev/null; then return 1; fi
+            URL=$(echo "$RESP" | jq -r '.data.downloadPage // empty' 2>/dev/null)
+            [ -n "$URL" ] && echo "$URL" || return 1
+          }
+
+          filester_upload() {
+            local f="$1" RESP CODE SLUG
+            RESP=$(curl -sf --max-time 300 -w "\n__CODE__%{http_code}" \
+              -X POST "https://u1.filester.me/api/v1/upload" \
+              $([ -n "$FILESTER_API_KEY" ] && echo "-H" && echo "Authorization: Bearer $FILESTER_API_KEY") \
+              -F "file=@$f" 2>/dev/null || echo "__CODE__000")
+            CODE=$(echo "$RESP" | grep "__CODE__" | grep -o '[0-9]*$')
+            RESP=$(echo "$RESP" | grep -v "__CODE__")
+            if [ "$CODE" = "429" ]; then return 1; fi
+            if ! echo "$RESP" | jq empty 2>/dev/null; then return 1; fi
+            SLUG=$(echo "$RESP" | jq -r 'if .success then .slug else empty end' 2>/dev/null)
+            [ -n "$SLUG" ] && echo "https://filester.me/d/$SLUG" || return 1
+          }
+
+          supabase_insert() {
+            local ch="$1" ts="$2" gf="$3" fl="$4" sz="$5" src="$6"
+            
+            # Skip if Supabase not configured
+            if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+              return 0
+            fi
+            
+            # Convert timestamp to ISO 8601 format for Supabase
+            local ts_iso
+            ts_iso=$(date -d "$ts" -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+            
+            # Extract date from timestamp
+            local date_only
+            date_only=$(echo "$ts" | cut -d' ' -f1)
+            
+            # Build JSON payload
+            local payload
+            payload=$(jq -n \
+              --arg site "chaturbate" \
+              --arg ch "$ch" \
+              --arg ts "$ts_iso" \
+              --arg date "$date_only" \
+              --arg dur "0" \
+              --arg sz "$sz" \
+              --arg qual "unknown" \
+              --arg gf "${gf:-(not uploaded)}" \
+              --arg fl "${fl:-(not uploaded)}" \
+              --arg sess "$SESSION_ID" \
+              --arg job "$MATRIX_JOB_ID" \
+              '{
+                site: $site,
+                channel: $ch,
+                timestamp: $ts,
+                date: $date,
+                duration_seconds: ($dur|tonumber),
+                file_size_bytes: ($sz|tonumber),
+                quality: $qual,
+                gofile_url: $gf,
+                filester_url: $fl,
+                session_id: $sess,
+                matrix_job: $job
+              }')
+            
+            # Insert into Supabase
+            local resp http_code
+            resp=$(curl -sf --max-time 10 -w "\n__CODE__%{http_code}" \
+              -X POST "${SUPABASE_URL}/rest/v1/recordings" \
+              -H "apikey: ${SUPABASE_KEY}" \
+              -H "Authorization: Bearer ${SUPABASE_KEY}" \
+              -H "Content-Type: application/json" \
+              -H "Prefer: return=minimal" \
+              -d "$payload" 2>/dev/null || echo "__CODE__000")
+            
+            http_code=$(echo "$resp" | grep "__CODE__" | grep -o '[0-9]*$')
+            
+            if [ "$http_code" = "201" ] || [ "$http_code" = "200" ]; then
+              echo "  Supabase: inserted" >&2
+              return 0
+            else
+              echo "  Supabase: failed (HTTP $http_code)" >&2
+              return 1
+            fi
+          }
+
+          db_write() {
+            local f="$1" gf="$2" fl="$3" sz="$4" src="$5"
+            local fname ch date ts db_file entry tmp
+            fname=$(basename "$f")
+            ch=$(echo "$fname" | sed -E 's/_[0-9]{4}-[0-9]{2}-[0-9]{2}.*$//')
+            [ "$ch" = "$fname" ] && ch=$(echo "$fname" | sed -E 's/_[0-9]+\.[^.]*$//')
+            date=$(echo "$fname" | grep -oP '\d{4}-\d{2}-\d{2}' | head -1 || date -u +%Y-%m-%d)
+            ts=$(echo "$fname" | grep -oP '\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}' | head -1 | tr '_' ' ' || date -u +"%Y-%m-%d %H:%M:%S")
+            [ -z "$ch" ] || [ "$ch" = "$fname" ] && ch="unknown"
+            mkdir -p "./database/$ch"
+            db_file="./database/$ch/$date.json"
+            local unique_id="${ts}-$(date +%s%N | md5sum | cut -c1-8)"
+            entry=$(jq -n \
+              --arg id "$unique_id" --arg ch "$ch" --arg ts "$ts" \
+              --arg gf "${gf:-(not uploaded)}" --arg fl "${fl:-(not uploaded)}" \
+              --arg sz "$sz" --arg src "$src" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{id:$id,channel:$ch,timestamp:$ts,gofile_url:$gf,filester_url:$fl,filesize:($sz|tonumber),uploaded_at:$at,source:$src}')
+            if ! echo "$entry" | jq empty 2>/dev/null; then return 1; fi
+            if [ -f "$db_file" ]; then
+              tmp="${db_file}.tmp"
+              if ! jq --argjson e "$entry" '. += [$e]' "$db_file" > "$tmp" 2>/dev/null; then
+                rm -f "$tmp"; return 1
+              fi
+              mv "$tmp" "$db_file"
+            else
+              printf '[%s]\n' "$entry" | jq '.' > "$db_file"
+            fi
+            
+            # Also insert into Supabase
+            supabase_insert "$ch" "$ts" "$gf" "$fl" "$sz" "$src" || true
+          }
+
+          # CRITICAL FIX: Convert all .ts files with proper validation
+          while IFS= read -r ts_f; do
+            [ -f "$ts_f" ] || continue
+            
+            # Check file size first
+            ts_sz=$(stat -c%s "$ts_f" 2>/dev/null || echo 0)
+            if [ "$ts_sz" -lt 1048576 ]; then
+              echo "WARNING: TS file too small ($ts_sz bytes), skipping: $(basename "$ts_f")"
+              rm -f "$ts_f"
+              continue
+            fi
+            
+            mp4="${ts_f%.ts}.mp4"
+            tmp="${ts_f%.ts}_conv.mp4"
+            
+            echo "Converting: $(basename "$ts_f") ($ts_sz bytes)..."
+            if ffmpeg -nostdin -y -i "$ts_f" -c copy -movflags +faststart "$tmp" 2>&1 | tee /tmp/ffmpeg_emergency.log >&2; then
+              if [ -s "$tmp" ]; then
+                # Validate MP4 output
+                if ffprobe -v error "$tmp" >/dev/null 2>&1; then
+                  mv "$tmp" "$mp4"
+                  rm -f "$ts_f"
+                  echo "✓ Converted: $(basename "$mp4")"
+                else
+                  echo "✗ Validation failed for: $(basename "$mp4")"
+                  cat /tmp/ffmpeg_emergency.log >&2
+                  rm -f "$tmp" "$mp4"
+                fi
+              else
+                echo "✗ Empty output for: $(basename "$ts_f")"
+                rm -f "$tmp" "$mp4"
+              fi
+            else
+              echo "✗ Conversion failed for: $(basename "$ts_f")"
+              cat /tmp/ffmpeg_emergency.log >&2
+              rm -f "$tmp" "$mp4"
+            fi
+          done < <(find ./videos -type f -name '*.ts' 2>/dev/null)
+
+          OK=0; FAIL=0; BATCH=0; SKIPPED=0
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
+            
+            # CRITICAL FIX: Skip files that are too small (likely corrupted)
+            if [ "$sz" -lt 1048576 ]; then
+              echo "⚠ Skipping corrupted file: $(basename "$f") ($sz bytes)"
+              rm -f "$f"
+              SKIPPED=$((SKIPPED+1))
+              continue
+            fi
+            
+            # Validate MP4 files before upload
+            if [[ "$f" == *.mp4 ]]; then
+              if ! ffprobe -v error "$f" >/dev/null 2>&1; then
+                echo "⚠ Skipping invalid MP4: $(basename "$f")"
+                rm -f "$f"
+                SKIPPED=$((SKIPPED+1))
                 continue
               fi
-
-              echo "  📤 $FILENAME ($(du -h "$video" 2>/dev/null | cut -f1))"
-
-              GOFILE_URL=""
-              FILESTER_URL=""
-
-              if [ -n "$GOFILE_API_KEY" ]; then
-                echo "    Uploading to Gofile..."
-                SERVER=$(timeout 10s curl -s "https://api.gofile.io/servers" 2>/dev/null | jq -r '.data.servers[0].name' 2>/dev/null || echo "")
-                if [ -n "$SERVER" ] && [ "$SERVER" != "null" ]; then
-                  RESPONSE=$(timeout 120s curl -s -F "file=@$video" -F "token=$GOFILE_API_KEY" "https://$SERVER.gofile.io/contents/uploadfile" 2>/dev/null || echo "")
-                  GOFILE_URL=$(echo "$RESPONSE" | jq -r '.data.downloadPage' 2>/dev/null || echo "")
-                  if [ -n "$GOFILE_URL" ] && [ "$GOFILE_URL" != "null" ]; then
-                    echo "    ✅ Gofile: $GOFILE_URL"
-                  else
-                    echo "    ❌ Gofile upload failed or timed out"
-                    GOFILE_URL=""
-                  fi
-                else
-                  echo "    ❌ Could not get Gofile server"
-                fi
-              fi
-
-              if [ -n "$FILESTER_API_KEY" ]; then
-                echo "    Uploading to Filester..."
-                RESPONSE=$(timeout 120s curl -s -w "\nHTTP_CODE:%{http_code}" \
-                  -X POST "https://u1.filester.me/api/v1/upload" \
-                  -H "Authorization: Bearer $FILESTER_API_KEY" \
-                  -F "file=@$video" 2>/dev/null || echo "")
-                HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-                RESPONSE=$(echo "$RESPONSE" | sed '/HTTP_CODE:/d')
-                echo "    HTTP Status: $HTTP_CODE"
-
-                SUCCESS=$(echo "$RESPONSE" | jq -r '.success' 2>/dev/null || echo "")
-                SLUG=$(echo "$RESPONSE" | jq -r '.slug' 2>/dev/null || echo "")
-
-                if [ "$SUCCESS" = "true" ] && [ -n "$SLUG" ] && [ "$SLUG" != "null" ]; then
-                  FILESTER_URL="https://filester.me/d/$SLUG"
-                  echo "    ✅ Filester: $FILESTER_URL"
-                else
-                  echo "    ❌ Filester upload failed or timed out"
-                  MESSAGE=$(echo "$RESPONSE" | jq -r '.message' 2>/dev/null || echo "")
-                  [ -n "$MESSAGE" ] && echo "    Error: $MESSAGE"
-                fi
-              fi
-
-              if [ -n "$GOFILE_URL" ] || [ -n "$FILESTER_URL" ]; then
-                CHANNEL=$(echo "$FILENAME" | sed 's/_[0-9].*$//')
-                DATE=$(echo "$FILENAME" | sed 's/^.*_\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\).*$/\1/')
-                TIMESTAMP=$(echo "$FILENAME" | sed 's/^.*_\([0-9-]*_[0-9-]*\)\..*$/\1/' | tr '_' ' ')
-
-                if [[ ! "$DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-                  echo "    ⚠️  Invalid date format, using current date"
-                  DATE=$(date -u +%Y-%m-%d)
-                fi
-
-                if [ -z "$CHANNEL" ] || [ "$CHANNEL" = "$FILENAME" ]; then
-                  echo "    ⚠️  Could not extract channel name, using 'unknown'"
-                  CHANNEL="unknown"
-                fi
-
-                mkdir -p "./database/$CHANNEL"
-                DB_FILE="./database/$CHANNEL/$DATE.json"
-
-                [ -z "$GOFILE_URL" ] && GOFILE_URL="(upload failed)"
-                [ -z "$FILESTER_URL" ] && FILESTER_URL="(upload failed)"
-
-                NEW_ENTRY=$(jq -n \
-                  --arg channel "$CHANNEL" \
-                  --arg timestamp "$TIMESTAMP" \
-                  --arg gofile "$GOFILE_URL" \
-                  --arg filester "$FILESTER_URL" \
-                  --arg size "$FILESIZE" \
-                  '{channel:$channel,timestamp:$timestamp,gofile_url:$gofile,filester_url:$filester,filesize:($size|tonumber),uploaded_at:(now|strftime("%Y-%m-%dT%H:%M:%SZ")),source:"'"$SOURCE"'"}')
-
-                if [ -f "$DB_FILE" ]; then
-                  jq --argjson e "$NEW_ENTRY" '. += [$e]' "$DB_FILE" > "$DB_FILE.tmp" && mv "$DB_FILE.tmp" "$DB_FILE"
-                else
-                  echo "[$NEW_ENTRY]" | jq '.' > "$DB_FILE"
-                fi
-
-                rm -f "$video"
-                UPLOADED=$((UPLOADED + 1))
-                echo "    ✅ Saved to database and cleaned up"
+            fi
+            
+            echo "Processing: $(basename "$f") (${sz} bytes)"
+            gf=""; fl=""; any_ok=0
+            if [ -n "$GOFILE_API_KEY" ]; then
+              if gf=$(retry_upload gofile_upload "$f"); then
+                echo "  Gofile: $gf"; any_ok=1
               else
-                FAILED=$((FAILED + 1))
-                echo "    ❌ Both uploads failed, keeping file for cache"
+                echo "  Gofile failed after retries"
               fi
-            done < <(find ./videos -type f \( -name "*.mp4" -o -name "*.ts" -o -name "*.mkv" \) -printf '%s %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
-          fi
-          echo "  ✅ Uploaded: $UPLOADED, Failed: $FAILED, Skipped (too large): $SKIPPED_SIZE"
-
-          echo ""
-          echo "Step 4/5: Committing to GitHub..."
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-          if [ -d "./database" ] && [ "$(ls -A ./database 2>/dev/null)" ]; then
-            git add ./database/*/*.json 2>/dev/null || true
-            if ! git diff --staged --quiet 2>/dev/null; then
-              COMMIT_MSG=$(printf "chore: emergency upload (%s) [skip ci]\n\nJob: %s\nChannel: %s\nReason: %s\nUploaded: %s files\nTimestamp: %s" \
-                "$SOURCE" "${{ matrix.job.id }}" "${{ matrix.job.channel }}" "$REASON" "$UPLOADED" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
-              git commit -m "$COMMIT_MSG" 2>/dev/null || true
-
-              for i in 1 2 3; do
-                # FIX 6: jitter before each push attempt
-                sleep $((RANDOM % 10))
-                if git push origin HEAD:main 2>/dev/null; then
-                  echo "  ✅ Pushed to GitHub"
-                  break
-                else
-                  [ $i -lt 3 ] && sleep 2 && git pull --rebase origin main 2>/dev/null || true
-                fi
-              done
             fi
-          fi
-
-          echo ""
-          echo "Step 5/5: Cleanup..."
-          REMAINING=$(find ./videos -type f \( -name "*.mp4" -o -name "*.ts" -o -name "*.mkv" \) 2>/dev/null | wc -l || echo "0")
-          echo "  Remaining files: $REMAINING"
-
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ Emergency processing complete"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-      # FIX 4: renamed from "Emergency database commit (runs on cancellation/timeout)"
-      # The condition always() && !cancelled() && !failure() == success(), so this step
-      # only ever ran on successful completion. Renamed for clarity and simplified condition.
-      - name: Normal completion database commit
-        if: success()
-        continue-on-error: true
-        timeout-minutes: 2
-        run: |
-          echo "📦 Normal completion database commit..."
-
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-          if [ -d "./database" ] && [ "$(ls -A ./database 2>/dev/null)" ]; then
-            git add ./database/*/*.json 2>/dev/null || true
-
-            if git diff --staged --quiet; then
-              echo "ℹ️  No new database entries to commit"
+            if [ -n "$FILESTER_API_KEY" ]; then
+              if fl=$(retry_upload filester_upload "$f"); then
+                echo "  Filester: $fl"; any_ok=1
+              else
+                echo "  Filester failed after retries"
+              fi
+            fi
+            if [ "$any_ok" -eq 1 ]; then
+              db_write "$f" "$gf" "$fl" "$sz" "emergency" && rm -f "$f" && OK=$((OK+1))
+              
+              # Upload artifacts every 5 files to prevent data loss
+              BATCH=$((BATCH+1))
+              if [ $((BATCH % 5)) -eq 0 ]; then
+                echo "📦 Uploading intermediate database artifacts (batch $((BATCH/5)))..."
+              fi
             else
-              COMMIT_MSG=$(printf "chore: update database (normal completion) [skip ci]\n\nJob: %s\nChannel: %s\nRun ID: %s\nSession: %s\nTimestamp: %s" \
-                "${{ matrix.job.id }}" "${{ matrix.job.channel }}" "${{ github.run_id }}" \
-                "${{ needs.validate.outputs.session_id }}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
-
-              git commit -m "$COMMIT_MSG"
-
-              MAX_RETRIES=3
-              RETRY_COUNT=0
-              while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-                # FIX 6: jitter to reduce simultaneous push conflicts
-                sleep $((RANDOM % 10))
-                echo "Attempting to push (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)..."
-                if git push origin HEAD:main; then
-                  echo "✅ Database successfully pushed"
-                  break
-                else
-                  RETRY_COUNT=$((RETRY_COUNT + 1))
-                  if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                    echo "⚠️  Push failed, retrying..."
-                    git pull --rebase origin main || true
-                  else
-                    echo "❌ Failed to push database after $MAX_RETRIES attempts"
-                  fi
-                fi
-              done
+              FAIL=$((FAIL+1))
             fi
-          else
-            echo "ℹ️  No database directory or files found"
-          fi
+          done < <(find ./videos -type f \( -name '*.mp4' -o -name '*.ts' -o -name '*.mkv' \) -printf '%s %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
+          echo "=========================================="
+          echo "Emergency upload complete:"
+          echo "  ✓ Uploaded: $OK"
+          echo "  ✗ Failed: $FAIL"
+          echo "  ⚠ Skipped (corrupted): $SKIPPED"
+          echo "=========================================="
 
-      # FIX 4: this step genuinely only makes sense on success (recordings uploaded,
-      # no need to cache them again). Condition is now explicit: if: success()
-      - name: Prepare stable recordings for cache
-        if: success()
-        timeout-minutes: 1
-        run: |
-          echo "📦 Preparing stable recordings for cache..."
-
-          if [ ! -d "./videos" ]; then
-            echo "ℹ️  No videos directory found"
-            exit 0
-          fi
-
-          VIDEO_FILES=$(find ./videos -type f \( -name "*.ts" -o -name "*.mp4" -o -name "*.mkv" \) 2>/dev/null)
-          if [ -z "$VIDEO_FILES" ]; then
-            echo "ℹ️  No video files found"
-            exit 0
-          fi
-
-          mkdir -p ./videos-stable
-
-          STABLE_COUNT=0
-          OPEN_COUNT=0
-
-          # FIX 5: use find+while; lsof is now installed in "Install ffmpeg and lsof"
-          while IFS= read -r video; do
-            [ -f "$video" ] || continue
-
-            filename=$(basename "$video")
-
-            if lsof "$video" 2>/dev/null | grep -q .; then
-              echo "⚠️  File still open: $filename (copying anyway)"
-              cp "$video" "./videos-stable/$filename"
-              OPEN_COUNT=$((OPEN_COUNT + 1))
-            else
-              echo "✅ File is closed: $filename"
-              cp "$video" "./videos-stable/$filename"
-              STABLE_COUNT=$((STABLE_COUNT + 1))
-            fi
-          done < <(find ./videos -type f \( -name "*.ts" -o -name "*.mp4" -o -name "*.mkv" \) 2>/dev/null)
-
-          echo ""
-          echo "📊 Summary:"
-          echo "   Closed files: $STABLE_COUNT"
-          echo "   Open files: $OPEN_COUNT"
-          echo "   Total files: $((STABLE_COUNT + OPEN_COUNT))"
-
-          if [ "$(ls -A ./videos-stable 2>/dev/null)" ]; then
-            echo "✅ Prepared $((STABLE_COUNT + OPEN_COUNT)) file(s) for caching"
-            rm -rf ./videos
-            mv ./videos-stable ./videos
-            ls -lh ./videos/
-          else
-            echo "⚠️  No files to cache"
-            rm -rf ./videos-stable
-          fi
-
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      # CRITICAL OPERATIONS — ordered by priority
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-      - name: Commit and push database to repository (PRIORITY 1)
-        if: always()
-        continue-on-error: true
-        timeout-minutes: 2
-        run: |
-          echo "📦 Committing database to repository..."
-
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-          if [ -d "./database" ] && [ "$(ls -A ./database 2>/dev/null)" ]; then
-            git add ./database/*/*.json 2>/dev/null || true
-
-            if git diff --staged --quiet; then
-              echo "ℹ️  No new database entries to commit"
-            else
-              COMMIT_MSG=$(printf "chore: update recording database [skip ci]\n\nJob: %s\nChannel: %s\nRun ID: %s\nSession: %s\nTimestamp: %s" \
-                "${{ matrix.job.id }}" "${{ matrix.job.channel }}" "${{ github.run_id }}" \
-                "${{ needs.validate.outputs.session_id }}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
-
-              git commit -m "$COMMIT_MSG"
-
-              MAX_RETRIES=3
-              RETRY_COUNT=0
-              while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-                # FIX 6: jitter to reduce simultaneous push conflicts across parallel jobs
-                sleep $((RANDOM % 10))
-                echo "Attempting to push (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)..."
-                if git push origin HEAD:main; then
-                  echo "✅ Database successfully pushed to repository"
-                  break
-                else
-                  RETRY_COUNT=$((RETRY_COUNT + 1))
-                  if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                    echo "⚠️  Push failed, retrying..."
-                    git pull --rebase origin main || true
-                  else
-                    echo "❌ Failed to push database after $MAX_RETRIES attempts"
-                  fi
-                fi
-              done
-            fi
-          else
-            echo "ℹ️  No database directory or files found (no recordings uploaded yet)"
-          fi
-
-      - name: Update status file (PRIORITY 2)
-        if: always()
-        timeout-minutes: 1
-        run: |
-          mkdir -p ./status
-
-          cat > ./status/job-${{ matrix.job.id }}.json << EOF
-          {
-            "job_id": "${{ matrix.job.id }}",
-            "session_id": "${{ needs.validate.outputs.session_id }}",
-            "run_id": "${{ github.run_id }}",
-            "status": "${{ job.status }}",
-            "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "runner": "${{ runner.os }}"
-          }
-          EOF
-
-          echo "✅ Status file created for job ${{ matrix.job.id }}"
-          echo "📊 Cleanup Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Database commit attempted" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Status file updated" >> $GITHUB_STEP_SUMMARY
-
-      - name: Save shared configuration cache (PRIORITY 3)
-        if: always()
-        uses: actions/cache/save@v4
-        continue-on-error: true
-        env:
-          ZSTD_CLEVEL: 19
-        with:
-          path: |
-            ./conf
-          key: shared-config-${{ github.run_id }}-${{ matrix.job.id }}
-
-      # FIX 3: save key now uses job-{id}-{run_id} order so the restore-key prefix
-      # "state-pending-upload-job-{id}-" correctly matches it across runs.
-      - name: Save job-specific state cache (PRIORITY 4)
-        if: always()
-        uses: actions/cache/save@v4
-        continue-on-error: true
-        env:
-          ZSTD_CLEVEL: 19
-        with:
-          path: |
-            ./videos
-            ./state
-            ./partial
-          key: state-pending-upload-job-${{ matrix.job.id }}-${{ github.run_id }}
-
-      - name: Upload recordings as artifacts (PRIORITY 5 - backup only)
+      - name: Save database artifact
         if: always()
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
-          name: recordings-job-${{ matrix.job.id }}-${{ github.run_id }}
-          path: |
-            ./videos/**/*.ts
-            ./videos/**/*.mp4
-            ./videos/**/*.mkv
-          retention-days: 7
-          compression-level: 0
+          name: db-job-${{ matrix.job.id }}-${{ matrix.job.channel }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ./database/
           if-no-files-found: ignore
+          retention-days: 7
+          
+      - name: Emergency database commit
+        if: always()
+        continue-on-error: true
+        run: |
+          # If we have database entries, try to commit them immediately
+          if [ -d "./database" ] && [ "$(find ./database -name '*.json' 2>/dev/null | wc -l)" -gt 0 ]; then
+            echo "Found database entries, attempting immediate commit..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git pull --rebase origin main || true
+            git add ./database/ 2>/dev/null || true
+            if ! git diff --staged --quiet; then
+              git commit -m "chore: emergency database update [skip ci]" \
+                -m "Job: ${{ matrix.job.channel }} (${{ matrix.job.id }})" \
+                -m "Run: ${{ github.run_id }}" || true
+              # Try to push, but don't fail if it doesn't work
+              for i in 1 2 3; do
+                if git push origin HEAD:main 2>/dev/null; then
+                  echo "✅ Emergency commit pushed successfully"
+                  break
+                fi
+                echo "Push attempt $i failed, retrying..."
+                sleep 2
+                git pull --rebase origin main 2>/dev/null || true
+              done
+            fi
+          fi
+
+      - name: Save state cache
+        if: always()
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        env:
+          ZSTD_CLEVEL: 19
+        with:
+          path: ./state
+          key: channel-state-${{ matrix.job.channel }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## [${{ matrix.job.channel }}] job ${{ matrix.job.id }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Session | ${{ needs.validate.outputs.session_id }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| DB entries | $(find ./database -name '*.json' 2>/dev/null | wc -l) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Remaining files | $(find ./videos -type f 2>/dev/null | wc -l) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Disk usage | $(df -h . | tail -1 | awk '{print $5}') |" >> "$GITHUB_STEP_SUMMARY"
+
+
+  commit-database:
+    name: Commit Database
+    needs: record
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all database artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: db-job-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ./db-artifacts/
+          merge-multiple: true
+
+      - name: Merge and commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
+
+          mkdir -p ./database
+          MERGED=0
+
+          while IFS= read -r af; do
+            [ -f "$af" ] || continue
+            # Validate artifact JSON before processing
+            if ! jq empty "$af" 2>/dev/null; then
+              echo "WARNING: Skipping invalid JSON file: $af"
+              continue
+            fi
+            rel="${af#./db-artifacts/}"
+            dest="./database/$rel"
+            mkdir -p "$(dirname "$dest")"
+            if [ -f "$dest" ]; then
+              # Validate destination JSON
+              if ! jq empty "$dest" 2>/dev/null; then
+                echo "WARNING: Destination file corrupted, replacing: $dest"
+                cp "$af" "$dest"
+              else
+                tmp="${dest}.tmp"
+                # Use unique ID for deduplication instead of channel+timestamp
+                if jq -s 'add | unique_by(.id) | sort_by(.uploaded_at)' "$dest" "$af" > "$tmp" 2>/dev/null; then
+                  mv "$tmp" "$dest"
+                else
+                  echo "WARNING: Failed to merge $af, keeping original"
+                  rm -f "$tmp"
+                fi
+              fi
+            else
+              cp "$af" "$dest"
+            fi
+            MERGED=$((MERGED+1))
+          done < <(find ./db-artifacts -name '*.json' 2>/dev/null)
+
+          echo "Merged $MERGED artifact file(s)"
+          git add ./database/ 2>/dev/null || true
+
+          if git diff --staged --quiet; then
+            echo "No new database entries to commit"; exit 0
+          fi
+
+          # Sanitize session ID for commit message
+          SESSION_ID="${{ needs.validate.outputs.session_id }}"
+          SESSION_ID_SAFE=$(echo "$SESSION_ID" | tr -cd '[:alnum:]-_')
+          
+          git commit -m "chore: update recording database [skip ci]" \
+            -m "Run: ${{ github.run_id }}" \
+            -m "Session: ${SESSION_ID_SAFE}" \
+            -m "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # Enhanced retry with exponential backoff
+          for attempt in 1 2 3 4 5; do
+            if git push origin HEAD:main; then
+              echo "Database pushed (attempt $attempt)"
+              exit 0
+            fi
+            echo "Push failed (attempt $attempt) - rebasing..."
+            sleep $((attempt * 3))
+            git pull --rebase origin main || { echo "Rebase failed"; continue; }
+          done
+          echo "ERROR: Failed to push after 5 attempts"
+          exit 1
+
+
+  restart:
+    name: Auto-Restart
+    needs: [validate, commit-database]
+    runs-on: ubuntu-latest
+    if: ${{ !cancelled() && needs.validate.outputs.matrix_jobs != '[]' }}
+    steps:
+      - name: Rate limit delay
+        run: |
+          echo "Waiting 30 seconds before dispatching next cycle to avoid rate limits..."
+          sleep 30
+          
+      - name: Dispatch next cycle
+        run: |
+          echo "Dispatching next cycle (completed run: ${{ github.run_id }})"
+          HTTP=$(curl -s -o /tmp/dispatch.json -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/continuous-runner.yml/dispatches" \
+            -d '{"ref":"main"}')
+          if [ "$HTTP" = "204" ]; then
+            echo "Next cycle dispatched successfully"
+          elif [ "$HTTP" = "403" ]; then
+            echo "WARNING: Rate limited by GitHub API, will retry in next cycle"
+            exit 0
+          else
+            echo "ERROR: Dispatch failed (HTTP $HTTP)"
+            cat /tmp/dispatch.json 2>/dev/null || true
+            exit 1
+          fi
