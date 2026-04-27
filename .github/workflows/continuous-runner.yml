@@ -809,14 +809,18 @@ jobs:
             supabase_insert "$ch" "$ts" "$gf" "$fl" "$sz" "$src" || true
           }
 
-          # CRITICAL FIX: Convert all .ts files with proper validation
+          # CRITICAL FIX: Convert and optimize all video files for web playback
+          echo "=========================================="
+          echo "Processing video files for upload..."
+          echo "=========================================="
+          
+          # Step 1: Convert all .ts files to .mp4
           while IFS= read -r ts_f; do
             [ -f "$ts_f" ] || continue
             
-            # Check file size first
             ts_sz=$(stat -c%s "$ts_f" 2>/dev/null || echo 0)
             if [ "$ts_sz" -lt 1048576 ]; then
-              echo "WARNING: TS file too small ($ts_sz bytes), skipping: $(basename "$ts_f")"
+              echo "⚠ Skipping small TS file: $(basename "$ts_f") ($ts_sz bytes)"
               rm -f "$ts_f"
               continue
             fi
@@ -824,36 +828,74 @@ jobs:
             mp4="${ts_f%.ts}.mp4"
             tmp="${ts_f%.ts}_conv.mp4"
             
-            echo "Converting: $(basename "$ts_f") ($ts_sz bytes)..."
-            if ffmpeg -nostdin -y -i "$ts_f" -c copy -movflags +faststart "$tmp" 2>&1 | tee /tmp/ffmpeg_emergency.log >&2; then
-              if [ -s "$tmp" ]; then
-                # Validate MP4 output
-                if ffprobe -v error "$tmp" >/dev/null 2>&1; then
-                  mv "$tmp" "$mp4"
-                  rm -f "$ts_f"
-                  echo "✓ Converted: $(basename "$mp4")"
-                else
-                  echo "✗ Validation failed for: $(basename "$mp4")"
-                  cat /tmp/ffmpeg_emergency.log >&2
-                  rm -f "$tmp" "$mp4"
-                fi
+            echo "Converting TS: $(basename "$ts_f") ($ts_sz bytes)"
+            if ffmpeg -nostdin -y -fflags +genpts -i "$ts_f" \
+                -c copy -movflags +faststart -avoid_negative_ts make_zero \
+                "$tmp" 2>&1 | tee /tmp/ffmpeg_emergency.log >&2; then
+              if [ -s "$tmp" ] && ffprobe -v error "$tmp" >/dev/null 2>&1; then
+                mv "$tmp" "$mp4"
+                rm -f "$ts_f"
+                echo "  ✓ Converted to MP4: $(basename "$mp4")"
               else
-                echo "✗ Empty output for: $(basename "$ts_f")"
+                echo "  ✗ Conversion failed, keeping TS"
                 rm -f "$tmp" "$mp4"
               fi
             else
-              echo "✗ Conversion failed for: $(basename "$ts_f")"
-              cat /tmp/ffmpeg_emergency.log >&2
+              echo "  ✗ FFmpeg failed, keeping TS"
               rm -f "$tmp" "$mp4"
             fi
           done < <(find ./videos -type f -name '*.ts' 2>/dev/null)
+          
+          # Step 2: Optimize all .mp4 files for web playback (fix fragmented MP4 from LL-HLS)
+          while IFS= read -r mp4_f; do
+            [ -f "$mp4_f" ] || continue
+            
+            mp4_sz=$(stat -c%s "$mp4_f" 2>/dev/null || echo 0)
+            if [ "$mp4_sz" -lt 1048576 ]; then
+              echo "⚠ Skipping small MP4 file: $(basename "$mp4_f") ($mp4_sz bytes)"
+              rm -f "$mp4_f"
+              continue
+            fi
+            
+            # Check if file needs faststart optimization
+            if ! ffprobe -v error "$mp4_f" >/dev/null 2>&1; then
+              echo "⚠ Skipping corrupted MP4: $(basename "$mp4_f")"
+              rm -f "$mp4_f"
+              continue
+            fi
+            
+            tmp="${mp4_f%.mp4}_opt.mp4"
+            echo "Optimizing MP4: $(basename "$mp4_f") ($mp4_sz bytes)"
+            
+            # Re-mux with faststart to fix fragmented MP4 from LL-HLS
+            if ffmpeg -nostdin -y -i "$mp4_f" \
+                -c copy -movflags +faststart \
+                "$tmp" 2>&1 | tee /tmp/ffmpeg_optimize.log >&2; then
+              if [ -s "$tmp" ] && ffprobe -v error "$tmp" >/dev/null 2>&1; then
+                mv "$tmp" "$mp4_f"
+                echo "  ✓ Optimized for web playback"
+              else
+                echo "  ✗ Optimization failed, keeping original"
+                rm -f "$tmp"
+              fi
+            else
+              echo "  ✗ FFmpeg failed, keeping original"
+              rm -f "$tmp"
+            fi
+          done < <(find ./videos -type f -name '*.mp4' 2>/dev/null)
+          
+          echo "=========================================="
+          echo "Video processing complete"
+          echo "=========================================="
+
 
           OK=0; FAIL=0; BATCH=0; SKIPPED=0
+          # Only upload .mp4 files - all videos should be converted/optimized by now
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
             
-            # CRITICAL FIX: Skip files that are too small (likely corrupted)
+            # Skip files that are too small (likely corrupted)
             if [ "$sz" -lt 1048576 ]; then
               echo "⚠ Skipping corrupted file: $(basename "$f") ($sz bytes)"
               rm -f "$f"
@@ -861,30 +903,28 @@ jobs:
               continue
             fi
             
-            # Validate MP4 files before upload
-            if [[ "$f" == *.mp4 ]]; then
-              if ! ffprobe -v error "$f" >/dev/null 2>&1; then
-                echo "⚠ Skipping invalid MP4: $(basename "$f")"
-                rm -f "$f"
-                SKIPPED=$((SKIPPED+1))
-                continue
-              fi
+            # Final validation before upload
+            if ! ffprobe -v error "$f" >/dev/null 2>&1; then
+              echo "⚠ Skipping invalid MP4: $(basename "$f")"
+              rm -f "$f"
+              SKIPPED=$((SKIPPED+1))
+              continue
             fi
             
-            echo "Processing: $(basename "$f") (${sz} bytes)"
+            echo "Uploading: $(basename "$f") (${sz} bytes)"
             gf=""; fl=""; any_ok=0
             if [ -n "$GOFILE_API_KEY" ]; then
               if gf=$(retry_upload gofile_upload "$f"); then
-                echo "  Gofile: $gf"; any_ok=1
+                echo "  ✓ Gofile: $gf"; any_ok=1
               else
-                echo "  Gofile failed after retries"
+                echo "  ✗ Gofile failed after retries"
               fi
             fi
             if [ -n "$FILESTER_API_KEY" ]; then
               if fl=$(retry_upload filester_upload "$f"); then
-                echo "  Filester: $fl"; any_ok=1
+                echo "  ✓ Filester: $fl"; any_ok=1
               else
-                echo "  Filester failed after retries"
+                echo "  ✗ Filester failed after retries"
               fi
             fi
             if [ "$any_ok" -eq 1 ]; then
@@ -898,7 +938,15 @@ jobs:
             else
               FAIL=$((FAIL+1))
             fi
-          done < <(find ./videos -type f \( -name '*.mp4' -o -name '*.ts' -o -name '*.mkv' \) -printf '%s %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
+          done < <(find ./videos -type f -name '*.mp4' -printf '%s %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
+          
+          # Warn about any remaining non-MP4 files
+          remaining_ts=$(find ./videos -type f -name '*.ts' 2>/dev/null | wc -l)
+          remaining_mkv=$(find ./videos -type f -name '*.mkv' 2>/dev/null | wc -l)
+          if [ "$remaining_ts" -gt 0 ] || [ "$remaining_mkv" -gt 0 ]; then
+            echo "⚠ WARNING: Found $remaining_ts .ts and $remaining_mkv .mkv files that couldn't be converted"
+          fi
+          
           echo "=========================================="
           echo "Emergency upload complete:"
           echo "  ✓ Uploaded: $OK"
