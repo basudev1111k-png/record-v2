@@ -3,3 +3,5 @@ goondvr
 conf
 bin
 .env
+database
+channels.txt
